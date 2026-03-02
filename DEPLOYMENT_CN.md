@@ -230,18 +230,21 @@ https://awsmarketplace.amazonaws.cn/marketplace/pp/prodview-65lo53ldx6wda
 
 ### 一键部署（控制台 - 推荐，约 10 分钟）
 
-1. 登录 [AWS 中国区控制台](https://console.amazonaws.cn/)
-2. 进入 CloudFormation 服务
-3. 点击 **创建堆栈** → **上传模板文件** → 选择 `clawdbot-china.yaml`
-4. 填写参数：
+1. 下载 CloudFormation 模板文件：[**clawdbot-china.yaml**](https://raw.githubusercontent.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock/main/clawdbot-china.yaml)（右键 → 另存为）
+2. 登录 [AWS 中国区控制台](https://console.amazonaws.cn/)
+3. 进入 CloudFormation 服务
+4. 点击 **创建堆栈** → **上传模板文件** → 选择下载的 `clawdbot-china.yaml`
+5. 填写参数（参考下图）：
+
+![CloudFormation 控制台参数填写示意图](images/china-cfn-console-parameters.png)
 
 | 参数 | 说明 | 建议值 |
 |------|------|--------|
 | **Stack name** | 堆栈名称 | `openclaw-china` |
-| **LLM API Key** | SiliconFlow API 密钥 | `sk-xxxxxxxx` |
+| **LLM API Key** | SiliconFlow API 密钥 | `sk-xxxxxxxx`（必填） |
 | **LLM API Base URL** | API 地址 | 默认即可（SiliconFlow） |
-| **LLM Model ID** | 模型名称（下拉选择） | 默认 Pro/DeepSeek-V3 |
-| **EC2 Instance Type** | 实例类型 | `c6g.large`（推荐） |
+| **LLM Model ID** | 模型名称（下拉选择） | 默认 `Pro/deepseek-ai/DeepSeek-V3` |
+| **EC2 Instance Type** | 实例类型 | `c6g.large`（推荐 ARM） |
 | **Use Existing VPC?** | 使用已有 VPC | `false`（新建）或 `true`（使用已有） |
 | **Existing VPC ID** | 已有 VPC（下拉选择） | 使用已有 VPC 时选择 |
 | **Existing Public Subnet ID** | 已有公有子网（下拉选择） | 使用已有 VPC 时选择 |
@@ -251,9 +254,9 @@ https://awsmarketplace.amazonaws.cn/marketplace/pp/prodview-65lo53ldx6wda
 
 > **VPC/子网下拉选择器**：当 `Use Existing VPC?` 设为 `true` 时，VPC 和子网参数会以下拉菜单形式展示你账号中的已有资源，方便直接选择。设为 `false` 时（新建 VPC），随意选择一个值即可——它会被忽略。
 
-5. 勾选 **我确认，AWS CloudFormation 可能会创建 IAM 资源**
-6. 点击 **创建堆栈**
-7. 等待约 10 分钟，状态变为 `CREATE_COMPLETE`
+6. 勾选 **我确认，AWS CloudFormation 可能会创建 IAM 资源**
+7. 点击 **创建堆栈**
+8. 等待约 10 分钟，状态变为 `CREATE_COMPLETE`
 
 ### CLI 部署
 
