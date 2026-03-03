@@ -522,49 +522,31 @@ Resources:
           exec > >(tee /var/log/openclaw-setup.log)
           exec 2>&1
 
-          echo "=========================================="
-          echo "OpenClaw AWS China Setup: $(date)"
-          echo "Region: ${AWS::Region}"
-          echo "LLM Provider: ${LLMApiBaseUrl}"
-          echo "Model: ${LLMModel}"
-          echo "=========================================="
-
+          echo "OpenClaw China Setup: $(date) | Region: ${AWS::Region} | Model: ${LLMModel}"
           export DEBIAN_FRONTEND=noninteractive
 
-          # System update
           echo "[1/9] Updating system..."
           apt-get update
           apt-get upgrade -y
           apt-get install -y unzip curl git
 
-          # Detect region and instance ID (IMDSv2)
-          echo "[*] Detecting instance metadata..."
-          IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || echo "")
-          if [ -n "$IMDS_TOKEN" ]; then
-            AWS_REGION=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "")
-            INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "")
-          else
-            AWS_REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "")
-            INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "")
-          fi
+          IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || true)
+          IMDS_H="X-aws-ec2-metadata-token: $IMDS_TOKEN"
+          AWS_REGION=$(curl -s -H "$IMDS_H" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || true)
+          INSTANCE_ID=$(curl -s -H "$IMDS_H" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || true)
           AWS_REGION=${!AWS_REGION:-"${AWS::Region}"}
           INSTANCE_ID=${!INSTANCE_ID:-"unknown"}
-          echo "Region: $AWS_REGION | Instance: $INSTANCE_ID"
 
-          # Install AWS CLI v2
           echo "[2/9] Installing AWS CLI..."
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-$(arch).zip" -o "awscliv2.zip"
+          curl -s "https://awscli.amazonaws.com/awscli-exe-linux-$(arch).zip" -o "awscliv2.zip"
           unzip -q awscliv2.zip
           ./aws/install
           rm -rf aws awscliv2.zip
 
-          # Install SSM Agent
           echo "[3/9] Configuring SSM Agent..."
           snap start amazon-ssm-agent || systemctl start amazon-ssm-agent
 
-          # Install Docker
           echo "[4/9] Installing Docker..."
-          # Use Alibaba Cloud mirror for faster Docker install in China
           curl -fsSL https://mirrors.aliyun.com/docker-ce/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg 2>/dev/null
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://mirrors.aliyun.com/docker-ce/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
           apt-get update
@@ -576,18 +558,10 @@ Resources:
           systemctl start docker
           usermod -aG docker ubuntu
 
-          # Configure Docker mirror for China
           mkdir -p /etc/docker
-          cat > /etc/docker/daemon.json << 'DOCKEREOF'
-          {
-            "registry-mirrors": [
-              "https://docker.1ms.run"
-            ]
-          }
-          DOCKEREOF
+          echo '{"registry-mirrors":["https://docker.1ms.run"]}' > /etc/docker/daemon.json
           systemctl restart docker
 
-          # Install Node.js
           echo "[5/9] Installing Node.js..."
           sudo -u ubuntu bash << 'UBUNTU_SCRIPT'
           cd ~
@@ -644,59 +618,30 @@ Resources:
           fi
           UBUNTU_SCRIPT
 
-          # Create wrapper script so openclaw works system-wide
           OPENCLAW_MJS=$(find /home/ubuntu/.nvm -path "*/node_modules/openclaw/openclaw.mjs" 2>/dev/null | head -1)
           NODE_BIN=$(find /home/ubuntu/.nvm -name node -type f 2>/dev/null | head -1)
-          if [ -z "$OPENCLAW_MJS" ] || [ -z "$NODE_BIN" ]; then
-            echo "FATAL: openclaw or node not found - npm install likely failed"
-            exit 1
-          fi
-          echo "#!/bin/bash" > /usr/local/bin/openclaw
-          echo "exec $NODE_BIN $OPENCLAW_MJS \"\$@\"" >> /usr/local/bin/openclaw
+          [ -z "$OPENCLAW_MJS" ] || [ -z "$NODE_BIN" ] && echo "FATAL: openclaw not found" && exit 1
+          printf '#!/bin/bash\nexec %s %s "$@"\n' "$NODE_BIN" "$OPENCLAW_MJS" > /usr/local/bin/openclaw
           chmod +x /usr/local/bin/openclaw
-          echo "openclaw wrapper created: node=$NODE_BIN mjs=$OPENCLAW_MJS"
+          /usr/local/bin/openclaw --version 2>/dev/null || { echo "FATAL: openclaw cannot execute"; exit 1; }
 
-          # Verify openclaw works
-          if ! /usr/local/bin/openclaw --version 2>/dev/null; then
-            echo "FATAL: openclaw wrapper cannot execute - check node path"
-            exit 1
-          fi
-          echo "openclaw verified OK: $(/usr/local/bin/openclaw --version)"
-
-          # Configure AWS region
           echo "[6/9] Configuring AWS..."
           sudo -u ubuntu mkdir -p /home/ubuntu/.aws
           sudo -u ubuntu bash -c "printf '[default]\nregion = %s\noutput = json\n' \"$AWS_REGION\" > /home/ubuntu/.aws/config"
-          chown -R ubuntu:ubuntu /home/ubuntu/.aws
           chmod 600 /home/ubuntu/.aws/config
 
-          # Configure environment variables
-          echo "[7/9] Configuring environment variables..."
-          {
-            echo "export AWS_REGION=$AWS_REGION"
-            echo "export AWS_DEFAULT_REGION=$AWS_REGION"
-            echo "export AWS_PROFILE=default"
-            echo "export OPENCLAW_MODEL=${LLMModel}"
-            echo "export OPENCLAW_LLM_PROVIDER=openai-compatible"
-          } >> /home/ubuntu/.bashrc
+          echo "[7/9] Configuring environment..."
+          printf 'export AWS_REGION=%s\nexport AWS_DEFAULT_REGION=%s\nexport OPENCLAW_MODEL=%s\nexport OPENCLAW_LLM_PROVIDER=openai-compatible\n' "$AWS_REGION" "$AWS_REGION" "${LLMModel}" >> /home/ubuntu/.bashrc
 
-          # Create systemd environment file
           sudo -u ubuntu mkdir -p /home/ubuntu/.config/environment.d
-          sudo -u ubuntu bash -c "{ echo AWS_REGION=$AWS_REGION; echo AWS_DEFAULT_REGION=$AWS_REGION; } > /home/ubuntu/.config/environment.d/aws.conf"
-
-          # Enable systemd linger
+          sudo -u ubuntu bash -c "printf 'AWS_REGION=%s\nAWS_DEFAULT_REGION=%s\n' \"$AWS_REGION\" \"$AWS_REGION\" > /home/ubuntu/.config/environment.d/aws.conf"
           loginctl enable-linger ubuntu
           systemctl start user@1000.service
 
-          # Configure OpenClaw
-          echo "[8/9] Configuring OpenClaw with SiliconFlow/OpenAI-compatible provider..."
-
+          echo "[8/9] Configuring OpenClaw..."
           sudo -u ubuntu mkdir -p /home/ubuntu/.openclaw
-
-          # Generate Gateway Token
           GATEWAY_TOKEN=$(openssl rand -hex 24)
 
-          # Create OpenAI-compatible provider configuration
           sudo -u ubuntu tee /home/ubuntu/.openclaw/openclaw.json > /dev/null << 'JSONEOF'
           {
             "gateway": {
@@ -762,8 +707,8 @@ Resources:
           export HOME=/home/ubuntu
           export NVM_DIR="$HOME/.nvm"
           [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-          openclaw gateway install || echo "Gateway install failed"
-          systemctl --user start openclaw-gateway.service || openclaw gateway || echo "Gateway start failed"
+          openclaw gateway install 2>/dev/null || true
+          systemctl --user start openclaw-gateway.service 2>/dev/null || { openclaw gateway & }
           '
 
           # Wait for daemon to be ready
@@ -825,31 +770,16 @@ Resources:
           echo "$AWS_REGION" > /home/ubuntu/.openclaw/region.txt
           chown ubuntu:ubuntu /home/ubuntu/.openclaw/*.txt
 
-          # Create SSM access script (retrieves token from SSM at runtime — never stored on disk)
           cat > /home/ubuntu/ssm-portforward.sh << 'SSMEOF'
           #!/bin/bash
-          IMDS_TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-          INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-          REGION=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/placement/region)
-          STACK_NAME=$(aws ec2 describe-tags --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=aws:cloudformation:stack-name" --query "Tags[0].Value" --output text --region $REGION)
-          TOKEN=$(aws ssm get-parameter --name "/openclaw/$STACK_NAME/gateway-token" --with-decryption --query Parameter.Value --output text --region $REGION)
-
-          echo "=========================================="
-          echo "OpenClaw SSM Port Forwarding"
-          echo "=========================================="
-          echo ""
-          echo "Run on your local computer:"
-          echo ""
-          echo "aws ssm start-session \\"
-          echo "  --target $INSTANCE_ID \\"
-          echo "  --region $REGION \\"
-          echo "  --document-name AWS-StartPortForwardingSession \\"
-          echo "  --parameters '{\"portNumber\":[\"18789\"],\"localPortNumber\":[\"18789\"]}'"
-          echo ""
-          echo "Then open in browser:"
-          echo "http://localhost:18789/?token=$TOKEN"
-          echo ""
-          echo "=========================================="
+          T=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+          H="X-aws-ec2-metadata-token: $T"
+          ID=$(curl -s -H "$H" http://169.254.169.254/latest/meta-data/instance-id)
+          R=$(curl -s -H "$H" http://169.254.169.254/latest/meta-data/placement/region)
+          S=$(aws ec2 describe-tags --filters "Name=resource-id,Values=$ID" "Name=key,Values=aws:cloudformation:stack-name" --query "Tags[0].Value" --output text --region $R)
+          TK=$(aws ssm get-parameter --name "/openclaw/$S/gateway-token" --with-decryption --query Parameter.Value --output text --region $R)
+          echo "Port forward: aws ssm start-session --target $ID --region $R --document-name AWS-StartPortForwardingSession --parameters '{\"portNumber\":[\"18789\"],\"localPortNumber\":[\"18789\"]}'"
+          echo "Browser: http://localhost:18789/?token=$TK"
           SSMEOF
           chmod +x /home/ubuntu/ssm-portforward.sh
           chown ubuntu:ubuntu /home/ubuntu/ssm-portforward.sh
@@ -879,53 +809,19 @@ Resources:
 
           echo "Signal sent successfully"
 
-          # Install S3 Files Skill (conditional)
           if [ "${InstallS3FilesSkill}" = "true" ]; then
-            echo "[*] Installing S3 Files Skill..."
-            echo "Waiting for OpenClaw workspace directory to be created..."
-
-            WORKSPACE_READY=false
-            for i in $(seq 1 300); do
-              if [ -d /home/ubuntu/.openclaw/workspace ]; then
-                echo "Workspace ready after $i seconds"
-                WORKSPACE_READY=true
-                break
-              fi
-              if [ $((i % 30)) -eq 0 ]; then
-                echo "  Still waiting for workspace... ($i/300 seconds)"
-              fi
-              sleep 1
-            done
-
-            if [ "$WORKSPACE_READY" = "false" ]; then
-              echo "Workspace not created after 5 minutes, creating manually..."
-              sudo -u ubuntu mkdir -p /home/ubuntu/.openclaw/workspace
-            fi
+            for i in $(seq 1 300); do [ -d /home/ubuntu/.openclaw/workspace ] && break; sleep 1; done
+            [ ! -d /home/ubuntu/.openclaw/workspace ] && sudo -u ubuntu mkdir -p /home/ubuntu/.openclaw/workspace
 
             sudo -u ubuntu bash << 'S3_SKILL_SCRIPT'
-            export HOME=/home/ubuntu
-            export NVM_DIR="$HOME/.nvm"
+            export HOME=/home/ubuntu NVM_DIR="$HOME/.nvm"
             [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-
-            mkdir -p /home/ubuntu/.openclaw/workspace/skills
-            cd /home/ubuntu/.openclaw/workspace/skills
-
-            echo "Cloning S3 Files Skill from repository..."
+            mkdir -p $HOME/.openclaw/workspace/skills && cd $HOME/.openclaw/workspace/skills
             git clone --depth 1 --no-checkout https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock.git temp-repo 2>&1
-            cd temp-repo
-            git sparse-checkout set skills/s3-files-skill/skills/s3-files 2>&1
-            git checkout 2>&1
-
-            mv skills/s3-files-skill/skills/s3-files ../s3-files
-            cd ..
-            rm -rf temp-repo
-
-            cd s3-files
-            echo "Installing skill dependencies..."
-            npm install 2>&1
-
+            cd temp-repo && git sparse-checkout set skills/s3-files-skill/skills/s3-files 2>&1 && git checkout 2>&1
+            mv skills/s3-files-skill/skills/s3-files ../s3-files && cd .. && rm -rf temp-repo
+            cd s3-files && npm install 2>&1
             if [ "${CreateS3Bucket}" = "true" ]; then
-              echo "Configuring skill with CloudFormation-created bucket..."
               cat > config.json <<EOF
           {
             "bucketName": "${AWS::StackName}-openclaw-files",
@@ -934,25 +830,13 @@ Resources:
             "maxUploadSizeMB": 100
           }
           EOF
-              echo "S3 Files Skill configured with bucket: ${AWS::StackName}-openclaw-files"
             else
               cp config.example.json config.json
-              echo "WARNING: S3 Files Skill installed but NOT configured!"
             fi
-
-            echo "S3 Files Skill installation complete"
           S3_SKILL_SCRIPT
-            echo "S3 Files Skill installed successfully"
-          else
-            echo "Skipping S3 Files Skill installation"
           fi
 
-          echo "=========================================="
-          echo "OpenClaw China installation complete!"
-          echo "LLM Provider: ${LLMApiBaseUrl}"
-          echo "Model: ${LLMModel}"
-          echo "Token stored in SSM Parameter Store"
-          echo "=========================================="
+          echo "OpenClaw China setup complete. Token in SSM."
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-instance"
