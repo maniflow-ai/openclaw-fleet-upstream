@@ -193,8 +193,6 @@ Supporting Services:
 
 ### Security Model
 
-Based on [Microsoft's OpenClaw security guidance](https://www.microsoft.com/en-us/security/blog/2026/02/19/running-openclaw-safely-identity-isolation-runtime-risk/):
-
 | Layer | Mechanism | What it prevents |
 |-------|-----------|-----------------|
 | **VM Isolation** | Firecracker microVM per tenant | Cross-tenant data leakage |
