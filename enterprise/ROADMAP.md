@@ -74,6 +74,21 @@
 - [x] Docker image v20: workspace path fix, SOUL identity override, AWS CLI via pip (not binary copy), DynamoDB usage tracking
 - [x] SOUL three-layer injection verified: Carol=Finance Analyst, Wang Wu=SDE, Zhang San=SA
 
+### Gateway Architecture
+- [x] H2 Proxy (bedrock_proxy_h2.js) — intercepts OpenClaw Bedrock SDK HTTP/2 calls, extracts sender identity from JSON metadata
+- [x] Tenant Router (tenant_router.py) — derives tenant_id, invokes AgentCore with session isolation
+- [x] H2 Proxy + Gateway as systemd services (auto-restart, survives EC2 reboot)
+- [x] Fast-path disabled — all IM messages route through AgentCore (no direct Bedrock fallback)
+- [x] Discord Bot connected and verified: DM → Gateway → H2 Proxy → Tenant Router → AgentCore → Bedrock → reply
+- [x] Gateway architecture documented in README (one Bot serves all employees)
+- [x] Employee onboarding flow documented (pairing code → IT approval → SSM mapping)
+
+### Monitor Center — Runtime Events
+- [x] CloudWatch Logs query for microVM lifecycle events (invocations, SIGTERM, assembly, sync)
+- [x] Runtime Events tab in Monitor page with summary cards + event timeline
+- [x] Auto-refresh every 15 seconds
+- [x] Event classification: invocation, response, cold_start, release, sync, plan_a, usage, mapping
+
 ### RBAC & Employee Portal
 - [x] Three-role system: Admin (full access), Manager (department-scoped), Employee (portal only)
 - [x] JWT authentication with role/department claims
@@ -114,6 +129,13 @@
 ## In Progress
 
 ### IM Channel User→Employee Mapping (Priority: High)
+- [x] SSM user-mapping write/read in Admin Console backend
+- [x] IM User Mappings tab in Bindings page (add/delete UI)
+- [x] H2 Proxy JSON metadata extraction (sender_id from OpenClaw message format)
+- [x] server.py SSM user-mapping lookup for non-emp base IDs
+- [ ] Pairing approve integration in Admin Console (subprocess call to openclaw CLI)
+- [ ] Auto-create DynamoDB Employee + Agent records from IM mapping
+
 Portal uses `emp-xxx` as user_id, so base ID extraction works. But IM channels use platform IDs:
 
 | Channel | user_id example | base ID extracted | S3 path | Status |

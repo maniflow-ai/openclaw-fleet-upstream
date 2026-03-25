@@ -457,6 +457,9 @@ enterprise/
 │   ├── server.py                          # HTTP server wrapping OpenClaw CLI
 │   ├── workspace_assembler.py             # 3-layer SOUL merge
 │   └── skill_loader.py                    # Role-filtered skill loading
+├── gateway/                               # EC2 Gateway components
+│   ├── bedrock_proxy_h2.js                # H2 Proxy — intercepts Bedrock SDK, extracts tenant identity
+│   └── tenant_router.py                   # Tenant Router — derives tenant_id, invokes AgentCore
 ├── auth-agent/                            # Authorization Agent (approval flow)
 └── demo/                                  # Interactive demo (no server needed)
     ├── README.md                          # Demo guide with scenarios
