@@ -1204,6 +1204,64 @@ def get_playground_profiles():
     }
     return profiles
 
+def _admin_assistant_direct(message: str) -> dict:
+    """Run Admin Assistant directly on EC2's OpenClaw (not via AgentCore microVM).
+    This gives the assistant real access to the EC2 filesystem, services, and logs."""
+    import subprocess as _sp
+    profile = {"role": "it_admin", "tools": ["web_search", "shell", "browser", "file", "code_execution"], "planA": "Full IT Admin access (read-only safety)", "planE": "Block credential exposure"}
+
+    openclaw_bin = "/home/ubuntu/.nvm/versions/node/v22.22.1/bin/openclaw"
+    env = os.environ.copy()
+    env["PATH"] = "/home/ubuntu/.nvm/versions/node/v22.22.1/bin:" + env.get("PATH", "")
+    env["HOME"] = "/home/ubuntu"
+
+    try:
+        cmd = ["sudo", "-u", "ubuntu", "env", f"PATH={env['PATH']}", "HOME=/home/ubuntu",
+               openclaw_bin, "agent", "--session-id", "admin-assistant", "--message", message, "--json", "--timeout", "120"]
+        result = _sp.run(cmd, capture_output=True, text=True, timeout=130, env=None)
+
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
+
+        # OpenClaw may write JSON to stderr in Gateway fallback mode
+        if not stdout and stderr:
+            json_start = stderr.find('{')
+            if json_start != -1:
+                stdout = stderr[json_start:]
+
+        if stdout:
+            json_start = stdout.find('{')
+            if json_start != -1:
+                import json as _j
+                decoder = _j.JSONDecoder()
+                data, _ = decoder.raw_decode(stdout, json_start)
+                payloads = data.get("payloads", [])
+                text = " ".join(p.get("text", "") for p in payloads if p.get("text")).strip()
+                if not text:
+                    text = data.get("text", str(data))
+                return {
+                    "response": text,
+                    "tenant_id": "admin",
+                    "profile": profile,
+                    "plan_a": profile["planA"],
+                    "plan_e": "✅ PASS — Direct EC2 execution.",
+                    "source": "ec2-direct",
+                }
+
+        return {
+            "response": f"OpenClaw returned no output.\nstdout: {stdout[:200]}\nstderr: {stderr[:200]}",
+            "tenant_id": "admin",
+            "profile": profile,
+            "plan_a": profile["planA"],
+            "plan_e": "⚠️ Empty response",
+            "source": "ec2-direct",
+        }
+    except _sp.TimeoutExpired:
+        return {"response": "⏳ Command timed out after 120s.", "tenant_id": "admin", "profile": profile, "plan_a": "", "plan_e": "TIMEOUT", "source": "error"}
+    except Exception as e:
+        return {"response": f"⚠️ Error: {e}", "tenant_id": "admin", "profile": profile, "plan_a": "", "plan_e": "ERROR", "source": "error"}
+
+
 @app.post("/api/v1/playground/send")
 def playground_send(body: PlaygroundMessage):
     """Send message to agent. mode=live routes through real Tenant Router → AgentCore."""
@@ -1215,6 +1273,10 @@ def playground_send(body: PlaygroundMessage):
 
     # Live mode: route through Tenant Router → AgentCore → OpenClaw
     if body.mode == "live":
+        # Special case: admin assistant runs directly on EC2 (not via AgentCore)
+        if emp_id == "admin":
+            return _admin_assistant_direct(body.message)
+
         router_url = os.environ.get("TENANT_ROUTER_URL", "http://localhost:8090")
         try:
             import requests as _req

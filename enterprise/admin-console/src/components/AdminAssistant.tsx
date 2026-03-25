@@ -61,7 +61,7 @@ export default function AdminAssistant() {
     setSending(true);
 
     try {
-      // Route through Tenant Router as IT Admin agent
+      // Route directly to EC2 OpenClaw (not AgentCore microVM)
       const resp = await api.post<{ response: string }>('/playground/send', {
         tenant_id: 'port__admin',
         message: userMsg.content,
@@ -72,26 +72,12 @@ export default function AdminAssistant() {
         content: resp.response,
         timestamp: new Date().toISOString(),
       }]);
-    } catch {
-      // Fallback to simulate mode
-      try {
-        const resp = await api.post<{ response: string }>('/playground/send', {
-          tenant_id: 'port__admin',
-          message: userMsg.content,
-          mode: 'simulate',
-        });
-        setMessages(prev => [...prev, {
-          id: Date.now() + 1, role: 'assistant',
-          content: resp.response,
-          timestamp: new Date().toISOString(),
-        }]);
-      } catch {
-        setMessages(prev => [...prev, {
-          id: Date.now() + 1, role: 'assistant',
-          content: 'Agent is starting up. Please try again in ~10 seconds.',
-          timestamp: new Date().toISOString(),
-        }]);
-      }
+    } catch (err: any) {
+      setMessages(prev => [...prev, {
+        id: Date.now() + 1, role: 'assistant',
+        content: `⚠️ ${err?.message || 'Failed to reach OpenClaw on EC2. The Gateway may be restarting.'}`,
+        timestamp: new Date().toISOString(),
+      }]);
     } finally {
       setSending(false);
     }
@@ -138,7 +124,7 @@ export default function AdminAssistant() {
             </div>
             <div>
               <h3 className="text-sm font-semibold text-text-primary">IT Admin Assistant</h3>
-              <p className="text-[10px] text-text-muted">OpenClaw on EC2 · Full system access</p>
+              <p className="text-[10px] text-text-muted">Running on EC2 · Direct shell access</p>
             </div>
           </div>
           <div className="flex items-center gap-1">
