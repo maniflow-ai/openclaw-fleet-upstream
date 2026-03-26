@@ -286,8 +286,8 @@ export default function Layout({ children }: { children: ReactNode }) {
         </main>
       </div>
 
-      {/* Floating Admin Assistant */}
-      <AdminAssistant />
+      {/* Floating Admin Assistant — admin only */}
+      {user?.role === 'admin' && <AdminAssistant />}
     </div>
   );
 }

@@ -61,8 +61,52 @@ DYNAMODB_TABLE = os.environ.get("DYNAMODB_TABLE", "openclaw-enterprise")
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-east-2")
 
 
-def _write_usage_to_dynamodb(tenant_id: str, base_id: str, usage: dict, model: str, duration_ms: int):
-    """Fire-and-forget: write usage metrics and update session in DynamoDB.
+def _append_conversation_turn(tenant_id: str, user_message: str, assistant_reply: str, model: str, duration_ms: int):
+    """Append a user+assistant turn to DynamoDB CONV#<tenant_id># for Session Detail view."""
+    try:
+        import boto3 as _b3_conv
+        from datetime import datetime, timezone
+        ddb = _b3_conv.resource("dynamodb", region_name=DYNAMODB_REGION)
+        table = ddb.Table(DYNAMODB_TABLE)
+        org_pk = "ORG#acme"
+        session_sk = f"SESSION#{tenant_id[:40]}"
+        ts = datetime.now(timezone.utc).isoformat()
+
+        # Get current turn count to use as seq
+        try:
+            resp = table.get_item(Key={"PK": org_pk, "SK": session_sk})
+            turns = int(resp.get("Item", {}).get("turns", 0))
+        except Exception:
+            turns = 0
+
+        seq_base = (turns - 1) * 2  # each turn has 2 messages: user + assistant
+
+        table.put_item(Item={
+            "PK": org_pk,
+            "SK": f"CONV#{tenant_id[:40]}#{seq_base:04d}",
+            "sessionId": tenant_id[:40],
+            "seq": seq_base,
+            "role": "user",
+            "content": user_message[:2000],  # cap to avoid large items
+            "ts": ts,
+        })
+        table.put_item(Item={
+            "PK": org_pk,
+            "SK": f"CONV#{tenant_id[:40]}#{seq_base + 1:04d}",
+            "sessionId": tenant_id[:40],
+            "seq": seq_base + 1,
+            "role": "assistant",
+            "content": assistant_reply[:4000],
+            "ts": ts,
+            "model": model,
+            "durationMs": duration_ms,
+        })
+    except Exception as e:
+        logger.warning("CONV# write failed (non-fatal): %s", e)
+
+
+def _write_usage_to_dynamodb(tenant_id: str, base_id: str, usage: dict, model: str, duration_ms: int, message: str = ""):
+    """Fire-and-forget: write usage metrics, session, and audit entry to DynamoDB.
     Runs in a background thread to avoid blocking the response."""
     try:
         import boto3 as _b3
@@ -101,11 +145,14 @@ def _write_usage_to_dynamodb(tenant_id: str, base_id: str, usage: dict, model: s
         )
 
         # 2. Update or create SESSION#{tenant_id} — increment turns, update lastMessage
+        # 'id' is set explicitly so the admin console can find sessions by ID without parsing the SK
+        session_id = tenant_id[:40]
         table.update_item(
-            Key={"PK": org_pk, "SK": f"SESSION#{tenant_id[:40]}"},
-            UpdateExpression="SET agentId = :aid, employeeId = :eid, #s = :status, lastActive = :now, GSI1PK = :gsi1pk, GSI1SK = :gsi1sk ADD turns :one, tokensUsed :tokens",
+            Key={"PK": org_pk, "SK": f"SESSION#{session_id}"},
+            UpdateExpression="SET id = :id, agentId = :aid, employeeId = :eid, #s = :status, lastActive = :now, GSI1PK = :gsi1pk, GSI1SK = :gsi1sk ADD turns :one, tokensUsed :tokens",
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
+                ":id": session_id,
                 ":aid": base_id,
                 ":eid": base_id,
                 ":status": "active",
@@ -113,11 +160,55 @@ def _write_usage_to_dynamodb(tenant_id: str, base_id: str, usage: dict, model: s
                 ":one": 1,
                 ":tokens": total_tokens,
                 ":gsi1pk": "TYPE#session",
-                ":gsi1sk": f"SESSION#{tenant_id[:40]}",
+                ":gsi1sk": f"SESSION#{session_id}",
             },
         )
 
         logger.info("DynamoDB usage written: %s tokens=%d cost=%s", base_id, total_tokens, cost)
+
+        # 3. Write audit entry — makes ALL channels (Discord, Telegram, Portal) visible
+        #    in the Admin Console Audit Center, not just Portal chat.
+        #    Try to resolve the employee display name from DynamoDB EMP# record.
+        actor_name = base_id
+        try:
+            emp_resp = table.get_item(Key={"PK": "ORG#acme", "SK": f"EMP#{base_id}"})
+            emp_item = emp_resp.get("Item", {})
+            if emp_item.get("name"):
+                actor_name = emp_item["name"]
+        except Exception:
+            pass
+
+        # Detect channel from tenant_id prefix (wa__, tg__, dc__, sl__, port__, etc.)
+        channel = "unknown"
+        t_parts = tenant_id.split("__")
+        if t_parts:
+            ch_map = {"wa": "WhatsApp", "tg": "Telegram", "dc": "Discord",
+                      "sl": "Slack", "ms": "Teams", "im": "iMessage",
+                      "gc": "Google Chat", "web": "Web", "port": "Portal"}
+            channel = ch_map.get(t_parts[0], t_parts[0].upper())
+
+        detail_msg = message[:100] if message else "(no message)"
+        audit_id = f"aud-{int(now.timestamp() * 1000)}"  # ms precision avoids overwrite
+        table.put_item(Item={
+            "PK": "ORG#acme",
+            "SK": f"AUDIT#{audit_id}",
+            "GSI1PK": "TYPE#audit",
+            "GSI1SK": f"AUDIT#{audit_id}",
+            "id": audit_id,
+            "timestamp": now.isoformat(),
+            "eventType": "agent_invocation",
+            "actorId": base_id,
+            "actorName": actor_name,
+            "targetType": "agent",
+            "targetId": base_id,
+            "channel": channel,
+            "detail": f"{channel} chat: {detail_msg}",
+            "status": "success",
+            "durationMs": duration_ms,
+            "model": model,
+        })
+        logger.info("Audit entry written: %s channel=%s", audit_id, channel)
+
     except Exception as e:
         logger.warning("DynamoDB usage write failed (non-fatal): %s", e)
 
@@ -604,7 +695,14 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
 
             threading.Thread(
                 target=_write_usage_to_dynamodb,
-                args=(tenant_id, base_id, usage, model, duration_ms),
+                args=(tenant_id, base_id, usage, model, duration_ms, message),
+                daemon=True,
+            ).start()
+
+            # Fire-and-forget: write conversation turn to DynamoDB for Session Detail view
+            threading.Thread(
+                target=_append_conversation_turn,
+                args=(tenant_id, message, response_text, model, duration_ms),
                 daemon=True,
             ).start()
 

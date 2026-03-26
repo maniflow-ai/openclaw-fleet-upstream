@@ -235,10 +235,29 @@ def get_usage_for_agent(agent_id: str) -> list[dict]:
 # === Sessions ===
 
 def get_sessions() -> list[dict]:
-    return _query("SESSION#")
+    """Return all sessions, injecting 'id' from the DynamoDB SK."""
+    try:
+        resp = _get_table().query(
+            KeyConditionExpression=Key("PK").eq(ORG_PK) & Key("SK").begins_with("SESSION#")
+        )
+        items = []
+        for item in resp.get("Items", []):
+            session_id = item.get("SK", "").replace("SESSION#", "", 1)
+            cleaned = _clean(item)
+            if "id" not in cleaned or not cleaned["id"]:
+                cleaned["id"] = session_id
+            items.append(cleaned)
+        return items
+    except ClientError as e:
+        print(f"[db] DynamoDB query error: {e}")
+        return []
 
 def get_session(session_id: str) -> dict | None:
-    return _get_item(f"SESSION#{session_id}")
+    """Return a single session by ID, injecting 'id' field."""
+    item = _get_item(f"SESSION#{session_id}")
+    if item and ("id" not in item or not item["id"]):
+        item["id"] = session_id
+    return item
 
 # === Employee Activity ===
 

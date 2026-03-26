@@ -315,6 +315,14 @@ export function useUpdateModelConfig() {
   });
 }
 
+export function useUpdateFallbackModel() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: Record<string, any>) => api.put('/settings/model/fallback', data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['model-config'] }),
+  });
+}
+
 export function useSetPositionModel() {
   const qc = useQueryClient();
   return useMutation({
@@ -389,6 +397,15 @@ export function useWorkspaceFile(key: string) {
     queryKey: ['workspace-file', key],
     queryFn: () => api.get(`/workspace/file?key=${encodeURIComponent(key)}`),
     enabled: !!key,
+  });
+}
+
+export function useSaveWorkspaceFile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ key, content }: { key: string; content: string }) =>
+      api.put<{ key: string; saved: boolean }>('/workspace/file', { key, content }),
+    onSuccess: (_, vars) => qc.invalidateQueries({ queryKey: ['workspace-file', vars.key] }),
   });
 }
 

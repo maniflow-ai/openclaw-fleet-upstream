@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { Settings as SettingsIcon, Cpu, Server, Globe, Key, Zap, Shield, HardDrive, Database, Cloud, AlertTriangle, Lock, Check, X, Plus, Trash2 } from 'lucide-react';
 import { Card, Badge, Button, PageHeader, Toggle, StatusDot, Table, Tabs, Modal, Select } from '../components/ui';
-import { useModelConfig, useSecurityConfig, useServiceStatus, usePositions, useUpdateModelConfig, useUpdateSecurityConfig, useSetPositionModel, useRemovePositionModel } from '../hooks/useApi';
+import { useModelConfig, useSecurityConfig, useServiceStatus, usePositions, useUpdateModelConfig, useUpdateFallbackModel, useUpdateSecurityConfig, useSetPositionModel, useRemovePositionModel } from '../hooks/useApi';
 
 export default function Settings() {
   const { data: modelConfig } = useModelConfig();
   const { data: securityConfig } = useSecurityConfig();
   const updateDefault = useUpdateModelConfig();
+  const updateFallback = useUpdateFallbackModel();
   const updateSecurity = useUpdateSecurityConfig();
   const setPositionModel = useSetPositionModel();
   const removePositionModel = useRemovePositionModel();
@@ -39,9 +40,7 @@ export default function Settings() {
   const handleChangeFallback = () => {
     const m = findModel(selectedModelId);
     if (m) {
-      const config = { ...mc, fallback: { modelId: m.modelId, modelName: m.modelName, inputRate: m.inputRate, outputRate: m.outputRate } };
-      // Fallback is stored in the same config object
-      updateDefault.mutate(config.default); // This triggers a refetch; we need a separate endpoint
+      updateFallback.mutate({ modelId: m.modelId, modelName: m.modelName, inputRate: m.inputRate, outputRate: m.outputRate });
       setShowChangeFallback(false);
       setSelectedModelId('');
     }

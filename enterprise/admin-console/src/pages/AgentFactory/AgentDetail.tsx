@@ -76,7 +76,7 @@ export default function AgentDetail() {
     <div>
       <PageHeader
         title={agent.name}
-        description={`${agent.positionName} · ${agent.employeeName} · Created ${new Date(agent.createdAt).toLocaleDateString()}`}
+        description={`${agent.positionName} · ${agent.employeeName}${agent.createdAt ? ` · Created ${new Date(agent.createdAt).toLocaleDateString()}` : ''}`}
         actions={
           <div className="flex gap-2">
             <Button variant="default" onClick={() => navigate('/agents')}><ArrowLeft size={16} /> Back</Button>
@@ -171,9 +171,9 @@ export default function AgentDetail() {
             <div>
               <p className="text-xs text-text-muted mb-1.5">SOUL Versions</p>
               <div className="flex gap-1.5">
-                <Badge>Global v{agent.soulVersions.global}</Badge>
-                <Badge color="primary">Position v{agent.soulVersions.position}</Badge>
-                <Badge color="success">Personal v{agent.soulVersions.personal}</Badge>
+                <Badge>Global v{agent.soulVersions?.global ?? 0}</Badge>
+                <Badge color="primary">Position v{agent.soulVersions?.position ?? 0}</Badge>
+                <Badge color="success">Personal v{agent.soulVersions?.personal ?? 0}</Badge>
               </div>
             </div>
             <div>
@@ -190,7 +190,7 @@ export default function AgentDetail() {
             </div>
             <div>
               <p className="text-xs text-text-muted mb-1">Last Updated</p>
-              <p className="text-sm text-text-secondary">{new Date(agent.updatedAt).toLocaleString()}</p>
+              <p className="text-sm text-text-secondary">{agent.updatedAt ? new Date(agent.updatedAt).toLocaleString() : '—'}</p>
             </div>
           </div>
         </Card>
@@ -207,7 +207,7 @@ export default function AgentDetail() {
                   <div className="h-2.5 w-2.5 rounded-full bg-success animate-pulse" />
                   <div>
                     <p className="text-sm font-medium">{s.employeeName}</p>
-                    <p className="text-xs text-text-muted">{s.lastMessage.slice(0, 60)}...</p>
+                    <p className="text-xs text-text-muted">{(s.lastMessage || '').slice(0, 60)}{s.lastMessage?.length > 60 ? '...' : ''}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-3">

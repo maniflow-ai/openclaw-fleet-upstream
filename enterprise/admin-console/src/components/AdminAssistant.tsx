@@ -58,7 +58,8 @@ export default function AdminAssistant() {
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
   useEffect(() => { if (open) setTimeout(() => inputRef.current?.focus(), 300); }, [open]);
 
-  const clearChat = useCallback(() => {
+  const clearChat = useCallback(async () => {
+    try { await api.del('/admin-ai/chat'); } catch {}
     setMessages([{
       id: Date.now(), role: 'assistant',
       content: 'Chat cleared. How can I help?',
@@ -74,11 +75,8 @@ export default function AdminAssistant() {
     setSending(true);
 
     try {
-      // Route directly to EC2 OpenClaw (not AgentCore microVM)
-      const resp = await api.post<{ response: string }>('/playground/send', {
-        tenant_id: 'port__admin',
+      const resp = await api.post<{ response: string }>('/admin-ai/chat', {
         message: userMsg.content,
-        mode: 'live',
       });
       setMessages(prev => [...prev, {
         id: Date.now() + 1, role: 'assistant',
@@ -88,7 +86,7 @@ export default function AdminAssistant() {
     } catch (err: any) {
       setMessages(prev => [...prev, {
         id: Date.now() + 1, role: 'assistant',
-        content: `⚠️ ${err?.message || 'Failed to reach OpenClaw on EC2. The Gateway may be restarting.'}`,
+        content: `⚠️ ${err?.message || 'Connection failed. Please try again.'}`,
         timestamp: new Date().toISOString(),
       }]);
     } finally {
@@ -137,7 +135,7 @@ export default function AdminAssistant() {
             </div>
             <div>
               <h3 className="text-sm font-semibold text-text-primary">IT Admin Assistant</h3>
-              <p className="text-[10px] text-text-muted">Running on EC2 · Direct shell access</p>
+              <p className="text-[10px] text-text-muted">查员工权限 · 改 SOUL 配置 · 查用量审计</p>
             </div>
           </div>
           <div className="flex items-center gap-1">
@@ -208,7 +206,7 @@ export default function AdminAssistant() {
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && !e.shiftKey && sendMessage()}
-              placeholder="Ask about system status, configs..."
+              placeholder="查员工权限、改 SOUL、查用量..."
               disabled={sending}
               className="flex-1 rounded-2xl border border-dark-border/40 bg-surface-dim px-3.5 py-2 text-[13px] text-text-primary placeholder:text-text-muted focus:border-primary/50 focus:outline-none disabled:opacity-50"
             />
@@ -221,7 +219,7 @@ export default function AdminAssistant() {
             </button>
           </div>
           <p className="text-[9px] text-text-muted mt-1.5 text-center">
-            Powered by OpenClaw on EC2 · Press Enter to send
+            Powered by Claude on Amazon Bedrock · Enter 发送
           </p>
         </div>
       </div>

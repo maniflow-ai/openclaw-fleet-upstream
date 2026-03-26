@@ -10,7 +10,7 @@ Turn [OpenClaw](https://github.com/openclaw/openclaw) from a personal AI assista
 >
 > This is not a mockup. Every button works, every chart reads from real data, every agent runs on Bedrock AgentCore in isolated Firecracker microVMs. Discord Bot connected with real SOUL injection and cross-session memory persistence verified.
 >
-> **Verified features:** 3-layer SOUL injection · Per-role tool permissions · Cross-session memory via S3 · OpenClaw Gateway mode in microVM · AgentCore Firecracker isolation
+> **Verified features:** 3-layer SOUL injection · Per-role tool permissions (Plan A + Plan E) · Cross-session memory via S3 · OpenClaw Gateway mode in microVM · AgentCore Firecracker isolation · All-channel audit logging (Portal + Discord + Telegram) · IT Admin Assistant (Claude API, 10 whitelisted tools) · Secrets in SSM SecureString · Agent Playground with live file editing
 >
 > Need a demo account? Contact [wjiad@aws](mailto:wjiad@amazon.com) to get access.
 
@@ -101,7 +101,7 @@ Every aspect of agent behavior is centrally managed and auditable:
 Security is not a feature — it's the architecture:
 
 - **No open ports** — Admin Console accessed via SSM port forwarding or CloudFront with origin restricted to CloudFront managed prefix list. No security group rules exposing ports to the internet.
-- **No hardcoded credentials** — Login password (`ADMIN_PASSWORD`) and JWT signing secret (`JWT_SECRET`) are environment variables. No secrets in source code.
+- **No hardcoded credentials** — Login password (`ADMIN_PASSWORD`) and JWT signing secret (`JWT_SECRET`) are stored in AWS SSM Parameter Store as `SecureString` (AES-256 encrypted). The systemd service file contains no secrets — it calls a startup wrapper script that fetches credentials from SSM at boot. No secrets in source code or service files.
 - **Tenant isolation** — Each employee's agent runs in a separate Firecracker microVM with its own filesystem, network namespace, and memory space. One compromised agent cannot affect another.
 - **IAM least privilege** — AgentCore execution role has only the permissions it needs: DynamoDB read/write, S3 read/write, SSM read, Bedrock invoke. No admin access, no wildcard policies.
 - **Comprehensive audit trail** — Every agent invocation, tool execution, permission denial, SOUL change, and admin action is logged to DynamoDB with actor, timestamp, and detail. AI Insights scanner detects anomalies (unusual hours, excessive tool usage, SOUL version drift).
@@ -148,8 +148,9 @@ The merged SOUL.md is what the agent reads. An SA agent and a Finance agent use 
 │  Admin Console (React + FastAPI)                             │
 │  ├── 24 pages (19 admin + 5 portal) + M3 Expressive design  │
 │  ├── 3-role RBAC (admin / manager / employee)                │
-│  ├── Dark/light theme toggle                                 │
-│  ├── IT Admin Assistant (floating chat bubble)               │
+│  ├── Agent Playground — live testing + employee file editor  │
+│  ├── IT Admin Assistant — Claude API, 10 whitelisted tools   │
+│  ├── Secrets in AWS SSM SecureString (no plaintext in files) │
 │  └── All data from DynamoDB + S3 (zero hardcoded values)     │
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
@@ -170,15 +171,17 @@ The merged SOUL.md is what the agent reads. An SA agent and a Finance agent use 
 │  │  Response → H2 Proxy → Gateway → IM channel           │    │
 │  └──────────────────────────────────────────────────────┘    │
 │                                                              │
-│  PATH B: IT Admin Assistant (direct EC2)                     │
+│  PATH B: IT Admin Assistant (Claude API, no subprocess)      │
 │  ┌──────────────────────────────────────────────────────┐    │
-│  │  Admin Console chat bubble                            │    │
-│  │       ↓ POST /api/v1/playground/send (admin)          │    │
-│  │  FastAPI _admin_assistant_direct()                     │    │
-│  │       ↓ subprocess: openclaw agent --message           │    │
-│  │  OpenClaw CLI on EC2 (separate HOME dir)              │    │
-│  │       ↓ direct Bedrock call (bypasses H2 Proxy)       │    │
-│  │  Bedrock (real endpoint, not localhost:8091)           │    │
+│  │  Admin Console chat bubble (admin role only)          │    │
+│  │       ↓ POST /api/v1/admin-ai/chat                    │    │
+│  │  FastAPI (require_role: admin)                         │    │
+│  │       ↓ boto3 bedrock-runtime.converse()              │    │
+│  │  Claude Haiku via Bedrock (10 whitelisted tools)      │    │
+│  │  Tools: list_employees, get_soul_template,            │    │
+│  │         update_soul_template, get_usage_report,       │    │
+│  │         get_service_health, get_audit_log, ...        │    │
+│  │  No shell · No subprocess · All ops via Python fns    │    │
 │  │       ↓                                               │    │
 │  │  Response → FastAPI → Admin Console                   │    │
 │  └──────────────────────────────────────────────────────┘    │
@@ -195,7 +198,7 @@ The merged SOUL.md is what the agent reads. An SA agent and a Finance agent use 
 
 **Path A** is for all employee agents — messages go through the Gateway → H2 Proxy → Tenant Router → AgentCore microVM pipeline. Each employee gets an isolated Firecracker microVM with their personalized SOUL, skills, and memory.
 
-**Path B** is for the IT Admin Assistant only — triggered when `userId === 'admin'` (set by the Admin Console chat bubble). The H2 Proxy detects this and proxies directly to real Bedrock, bypassing Tenant Router. **Important:** PATH B detection must use `userId === 'admin'` only — do NOT check for keywords in the system prompt (e.g. SOUL.md content), as the gateway SOUL is shared across all sessions and would incorrectly route all employees through PATH B.
+**Path B** is for the IT Admin Assistant only — a floating chat bubble visible only to admin-role users. It calls `POST /api/v1/admin-ai/chat` which invokes Claude via Bedrock Converse API directly from FastAPI (boto3), with a whitelist of 10 read/write tools implemented as Python functions. No subprocess, no OpenClaw, no Gateway dependency. Write operations (e.g. `update_soul_template`) create audit log entries automatically. Conversation history is maintained server-side per admin user and resets on service restart.
 
 ## Gateway Architecture: One Bot, All Employees
 

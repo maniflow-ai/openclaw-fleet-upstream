@@ -32,8 +32,19 @@ import auth as authmod
 
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-2")
 
+# Server start time — used to compute uptime for /settings/services
+_SERVER_START_TIME = time.time()
+
+# Default monthly budgets (USD) by department — overridden by DynamoDB CONFIG#budgets
+_DEFAULT_BUDGETS = {
+    "Engineering": 50.0, "Platform Team": 20.0, "Sales": 30.0,
+    "Product": 25.0, "Finance": 20.0, "HR & Admin": 15.0,
+    "Customer Success": 20.0, "Legal & Compliance": 10.0, "QA Team": 15.0,
+}
+
 app = FastAPI(title="OpenClaw Admin API", version="0.5.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+_ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "https://openclaw.awspsa.com,http://localhost:5173,http://localhost:8099").split(",")
+app.add_middleware(CORSMiddleware, allow_origins=_ALLOWED_ORIGINS, allow_methods=["GET","POST","PUT","DELETE","OPTIONS"], allow_headers=["Content-Type","Authorization"])
 
 
 # =========================================================================
@@ -529,8 +540,9 @@ def create_agent(body: dict):
 # =========================================================================
 
 @app.get("/api/v1/agents/{agent_id}/soul")
-def get_agent_soul(agent_id: str):
+def get_agent_soul(agent_id: str, authorization: str = Header(default="")):
     """Get three-layer SOUL for an agent. Reads from S3."""
+    _require_auth(authorization)
     agent = db.get_agent(agent_id)
     if not agent:
         raise HTTPException(404, "Agent not found")
@@ -555,8 +567,9 @@ class SoulSaveRequest(BaseModel):
     content: str
 
 @app.put("/api/v1/agents/{agent_id}/soul")
-def save_agent_soul(agent_id: str, body: SoulSaveRequest):
+def save_agent_soul(agent_id: str, body: SoulSaveRequest, authorization: str = Header(default="")):
     """Save a SOUL layer to S3. Increments version in DynamoDB."""
+    _require_role(authorization, roles=["admin", "manager"])
     agent = db.get_agent(agent_id)
     if not agent:
         raise HTTPException(404, "Agent not found")
@@ -606,8 +619,14 @@ def get_workspace_tree(agent_id: str = ""):
     return s3ops.get_workspace_tree(pos_id, emp_id)
 
 @app.get("/api/v1/workspace/file")
-def get_workspace_file(key: str):
-    """Read a single workspace file from S3."""
+def get_workspace_file(key: str, authorization: str = Header(default="")):
+    """Read a single workspace file from S3. Admin/manager can read any key; employees only their own."""
+    user = _require_auth(authorization)
+    # Employees can only access their own workspace, not other employees' files
+    if user.role == "employee":
+        allowed_prefix = f"{user.employee_id}/workspace/"
+        if not key.startswith(allowed_prefix) and not key.startswith("_shared/"):
+            raise HTTPException(403, "Access denied: you can only read your own workspace files")
     content = s3ops.read_file(key)
     if content is None:
         raise HTTPException(404, f"File not found: {key}")
@@ -619,11 +638,15 @@ class FileWriteRequest(BaseModel):
     content: str
 
 @app.put("/api/v1/workspace/file")
-def save_workspace_file(body: FileWriteRequest):
-    """Write a workspace file to S3."""
-    # Block writes to global layer
+def save_workspace_file(body: FileWriteRequest, authorization: str = Header(default="")):
+    """Write a workspace file to S3. Global layer locked; employees can only write their own files."""
+    user = _require_auth(authorization)
     if body.key.startswith("_shared/soul/global/"):
         raise HTTPException(403, "Global layer is locked")
+    # Employees can only modify their own workspace files
+    if user.role == "employee":
+        if not body.key.startswith(f"{user.employee_id}/workspace/"):
+            raise HTTPException(403, "Access denied: you can only modify your own workspace files")
     success = s3ops.write_file(body.key, body.content)
     if not success:
         raise HTTPException(500, "Failed to write file")
@@ -648,8 +671,9 @@ def get_file_version(key: str, versionId: str):
 # =========================================================================
 
 @app.get("/api/v1/agents/{agent_id}/memory")
-def get_agent_memory(agent_id: str):
+def get_agent_memory(agent_id: str, authorization: str = Header(default="")):
     """Get memory overview for an agent."""
+    _require_auth(authorization)
     agent = db.get_agent(agent_id)
     if not agent:
         raise HTTPException(404, "Agent not found")
@@ -912,10 +936,11 @@ class PairingApproveRequest(BaseModel):
     pairingUserId: str = ""   # username/handle (e.g. "wujiade4444") for dm_ mapping
 
 @app.post("/api/v1/bindings/pairing-approve")
-def approve_pairing(body: PairingApproveRequest):
+def approve_pairing(body: PairingApproveRequest, authorization: str = Header(default="")):
     """Approve IM pairing + create user mapping in one step.
     Calls `openclaw pairing approve <channel> <code>` via subprocess,
     then writes SSM user mapping if channelUserId is provided."""
+    _require_role(authorization, roles=["admin"])
     import subprocess as _sp
 
     # 1. Run openclaw pairing approve
@@ -1215,8 +1240,9 @@ class KBUploadRequest(BaseModel):
     content: str
 
 @app.post("/api/v1/knowledge/upload")
-def upload_knowledge_doc(body: KBUploadRequest):
+def upload_knowledge_doc(body: KBUploadRequest, authorization: str = Header(default="")):
     """Upload a Markdown document to a knowledge base."""
+    _require_role(authorization, roles=["admin", "manager"])
     meta = _KB_PREFIXES.get(body.kbId)
     if not meta:
         raise HTTPException(404, "Knowledge base not found")
@@ -1229,8 +1255,9 @@ def upload_knowledge_doc(body: KBUploadRequest):
     return {"key": key, "saved": True, "size": len(body.content)}
 
 @app.delete("/api/v1/knowledge/{kb_id}/file")
-def delete_knowledge_file(kb_id: str, filename: str):
+def delete_knowledge_file(kb_id: str, filename: str, authorization: str = Header(default="")):
     """Delete a knowledge document."""
+    _require_role(authorization, roles=["admin"])
     meta = _KB_PREFIXES.get(kb_id)
     if not meta:
         raise HTTPException(404, "Knowledge base not found")
@@ -1247,7 +1274,8 @@ def delete_knowledge_file(kb_id: str, filename: str):
 # =========================================================================
 
 @app.get("/api/v1/approvals")
-def get_approvals():
+def get_approvals(authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin", "manager"])
     all_approvals = db.get_approvals()
     pending = [a for a in all_approvals if a.get("status") == "pending"]
     resolved = [a for a in all_approvals if a.get("status") in ("approved", "denied")]
@@ -1255,10 +1283,11 @@ def get_approvals():
     return {"pending": pending, "resolved": resolved}
 
 @app.post("/api/v1/approvals/{approval_id}/approve")
-def approve_request(approval_id: str):
+def approve_request(approval_id: str, authorization: str = Header(default="")):
+    user = _require_role(authorization, roles=["admin", "manager"])
     result = db.update_approval(approval_id, {
         "status": "approved",
-        "reviewer": "Admin",
+        "reviewer": user.name,
         "resolvedAt": datetime.now(timezone.utc).isoformat(),
     })
     if not result:
@@ -1266,10 +1295,11 @@ def approve_request(approval_id: str):
     return result
 
 @app.post("/api/v1/approvals/{approval_id}/deny")
-def deny_request(approval_id: str):
+def deny_request(approval_id: str, authorization: str = Header(default="")):
+    user = _require_role(authorization, roles=["admin", "manager"])
     result = db.update_approval(approval_id, {
         "status": "denied",
-        "reviewer": "Admin",
+        "reviewer": user.name,
         "resolvedAt": datetime.now(timezone.utc).isoformat(),
     })
     if not result:
@@ -1397,8 +1427,9 @@ def _admin_assistant_direct(message: str) -> dict:
 
 
 @app.post("/api/v1/playground/send")
-def playground_send(body: PlaygroundMessage):
+def playground_send(body: PlaygroundMessage, authorization: str = Header(default="")):
     """Send message to agent. mode=live routes through real Tenant Router → AgentCore."""
+    _require_role(authorization, roles=["admin", "manager"])
     profiles = get_playground_profiles()
     profile = profiles.get(body.tenant_id, {"role": "unknown", "tools": ["web_search"], "planA": "Default", "planE": "Default"})
 
@@ -1866,6 +1897,9 @@ def get_sessions(source: str = "auto", authorization: str = Header(default="")):
                 continue
 
             agent = agent_by_emp.get(emp["id"])
+            # Set id to match DynamoDB SESSION# key pattern (raw_id is the tenant_id from logs)
+            # This ensures View button can look up the session via /monitor/sessions/{id}
+            cw["id"] = raw_id[:40] if raw_id else cw.get("id", "")
             cw["employeeId"] = emp["id"]
             cw["employeeName"] = emp["name"]
             cw["agentId"] = agent["id"] if agent else ""
@@ -1914,15 +1948,39 @@ def get_session_detail(session_id: str):
     # No conversation fallback — return empty list so frontend shows proper empty state
     # (Real conversation persistence requires a message storage integration)
 
-    # Quality metrics derived from session data
+    # Quality metrics: use real session data where available, estimate otherwise.
+    # tokensUsed and turns come from DynamoDB SESSION# records written by server.py.
     turns = session.get("turns", 1)
     tool_calls = session.get("toolCalls", 0)
+    tokens_used = session.get("tokensUsed", 0)
+    avg_tokens_per_turn = round(tokens_used / max(turns, 1))
+
+    # Satisfaction: use stored qualityScore if present, else turns-based estimate
+    stored_quality = session.get("qualityScore")
+    if stored_quality:
+        satisfaction = round(float(stored_quality), 1)
+    else:
+        satisfaction = round(min(5.0, 3.5 + turns * 0.15), 1)
+
+    # toolSuccess: real if we have audit data, otherwise derive from blocked count
+    agent_id = session.get("agentId", "")
+    audit_for_session = db.get_audit_entries(limit=100)
+    session_blocks = [
+        e for e in audit_for_session
+        if e.get("status") == "blocked" and e.get("targetId") == agent_id
+    ]
+    if tool_calls > 0:
+        tool_success = round(max(0, (tool_calls - len(session_blocks)) / tool_calls * 100), 1)
+    else:
+        tool_success = 100.0
+
     quality = {
-        "satisfaction": round(min(5.0, 3.5 + turns * 0.15), 1),
-        "toolSuccess": 100 if tool_calls == 0 else min(100, 80 + turns * 2),
+        "satisfaction": satisfaction,
+        "toolSuccess": tool_success,
         "responseTime": round(max(1.0, 4.5 - turns * 0.2), 1),
         "compliance": min(100, 90 + turns),
         "completionRate": min(100, 85 + turns * 2),
+        "avgTokensPerTurn": avg_tokens_per_turn,
     }
     quality["overallScore"] = round(
         0.3 * quality["satisfaction"] +
@@ -1932,17 +1990,20 @@ def get_session_detail(session_id: str):
         0.1 * (quality["completionRate"] / 20), 1
     )
 
-    # Plan E scan from conversation content
+    # Plan E: scan real conversation content if available, else report no data
     plan_e = []
-    for i, msg in enumerate(conv):
-        if msg["role"] == "assistant":
-            has_cost = "$" in msg["content"]
-            has_code = "```" in msg["content"]
-            plan_e.append({
-                "turn": i + 1,
-                "result": "flag" if has_cost else "pass",
-                "detail": "Cost data shared — within policy" if has_cost else "Code snippet — sandboxed" if has_code else "No sensitive data detected",
-            })
+    if conv:
+        for i, msg in enumerate(conv):
+            if msg["role"] == "assistant":
+                has_cost = "$" in msg["content"]
+                has_code = "```" in msg["content"]
+                plan_e.append({
+                    "turn": i + 1,
+                    "result": "flag" if has_cost else "pass",
+                    "detail": "Cost data shared — within policy" if has_cost else "Code snippet — sandboxed" if has_code else "No sensitive data detected",
+                })
+    else:
+        plan_e = [{"turn": 0, "result": "pass", "detail": "No conversation turns recorded yet"}]
 
     return {"session": session, "conversation": conv, "quality": quality, "planE": plan_e}
 
@@ -2077,7 +2138,8 @@ def get_alert_rules():
 
 @app.get("/api/v1/audit/entries")
 def get_audit_entries(limit: int = 50, eventType: Optional[str] = None, authorization: str = Header(default="")):
-    user = _get_current_user(authorization)
+    user = _require_auth(authorization)
+    limit = min(limit, 200)  # cap to prevent full-table dump
     entries = db.get_audit_entries(limit=limit)
     if eventType:
         entries = [e for e in entries if e.get("eventType") == eventType]
@@ -2250,6 +2312,41 @@ def run_audit_scan():
     return _audit_scan_cache
 
 
+def _format_uptime(seconds: float) -> str:
+    """Format seconds into a human-readable uptime string."""
+    secs = int(seconds)
+    days, remainder = divmod(secs, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    mins = remainder // 60
+    if days > 0:
+        return f"{days}d {hours}h {mins}m"
+    if hours > 0:
+        return f"{hours}h {mins}m"
+    return f"{mins}m"
+
+
+def _check_gateway_status() -> str:
+    """Try to hit the OpenClaw Gateway /health endpoint on localhost:18789."""
+    try:
+        import urllib.request as _ur
+        req = _ur.Request("http://localhost:18789/health", method="GET")
+        with _ur.urlopen(req, timeout=2) as resp:
+            return "healthy" if resp.status == 200 else "degraded"
+    except Exception:
+        return "unreachable"
+
+
+def _measure_bedrock_latency() -> int:
+    """Measure round-trip latency to Bedrock by timing a lightweight ListFoundationModels call."""
+    try:
+        import boto3 as _b3_lat
+        t0 = time.time()
+        _b3_lat.client("bedrock", region_name=AWS_REGION).list_foundation_models(maxResults=1)
+        return int((time.time() - t0) * 1000)
+    except Exception:
+        return 0
+
+
 @app.get("/api/v1/monitor/health")
 def get_monitor_health():
     """Comprehensive agent health metrics for Monitor Center."""
@@ -2257,12 +2354,70 @@ def get_monitor_health():
     employees = db.get_employees()
     usage_map = _get_agent_usage_today()
 
+    # Build last-active map from SESSION# records in DynamoDB
+    sessions = db.get_sessions()
+    session_last_active: dict[str, str] = {}
+    for s in sessions:
+        aid = s.get("agentId", "")
+        la = s.get("lastActive", "") or s.get("startedAt", "")
+        if aid and la:
+            if aid not in session_last_active or la > session_last_active[aid]:
+                session_last_active[aid] = la
+
+    # Compute per-agent avg response time from DynamoDB duration_ms field if present
+    # Fall back to a cost-proportional estimate if not available
+    total_duration_ms: dict[str, list] = {}
+    for s in sessions:
+        aid = s.get("agentId", "")
+        dur = s.get("avgResponseMs") or s.get("durationMs")
+        if aid and dur:
+            total_duration_ms.setdefault(aid, []).append(float(dur))
+
+    # Compute success rate from recent audit entries
+    audit_entries = db.get_audit_entries(limit=200)
+    agent_audit: dict[str, dict] = {}
+    for e in audit_entries:
+        aid = e.get("targetId", "")
+        if not aid:
+            continue
+        rec = agent_audit.setdefault(aid, {"success": 0, "blocked": 0})
+        if e.get("status") == "blocked":
+            rec["blocked"] += 1
+        else:
+            rec["success"] += 1
+
+    server_uptime = _format_uptime(time.time() - _SERVER_START_TIME)
+
     agent_health = []
     for agent in agents:
         usage = usage_map.get(agent["id"], {})
-        emp = next((e for e in employees if e["id"] == agent.get("employeeId")), None)
+        aid = agent["id"]
+
+        # lastActive: from SESSION# records; fall back to agent's own updatedAt
+        last_active = (
+            session_last_active.get(aid)
+            or agent.get("lastActive")
+            or agent.get("updatedAt")
+            or ""
+        )
+
+        # avgResponseSec: from session duration data; fall back to requests-based estimate
+        durations = total_duration_ms.get(aid, [])
+        if durations:
+            avg_resp = round(sum(durations) / len(durations) / 1000, 1)
+        else:
+            req = usage.get("requests", 0)
+            avg_resp = round(max(1.0, 5.0 - min(req, 20) * 0.1), 1) if req else 0.0
+
+        # toolSuccessRate: from audit log if we have entries; else 100 (no failures recorded)
+        audit = agent_audit.get(aid, {})
+        total_audit = audit.get("success", 0) + audit.get("blocked", 0)
+        tool_success = round(
+            (audit["success"] / total_audit * 100) if total_audit > 0 else 100.0, 1
+        )
+
         agent_health.append({
-            "agentId": agent["id"],
+            "agentId": aid,
             "agentName": agent["name"],
             "employeeName": agent.get("employeeName", ""),
             "positionName": agent.get("positionName", ""),
@@ -2271,26 +2426,46 @@ def get_monitor_health():
             "channels": agent.get("channels", []),
             "skillCount": len(agent.get("skills", [])),
             "requestsToday": usage.get("requests", 0),
-            "costToday": usage.get("cost", 0),
-            "avgResponseSec": round(2.0 + (hash(agent["id"]) % 30) / 10, 1),
-            "toolSuccessRate": min(100, 85 + (hash(agent["id"]) % 16)),
+            "costToday": round(usage.get("cost", 0), 4),
+            "avgResponseSec": avg_resp,
+            "toolSuccessRate": tool_success,
             "soulVersion": f"v{agent.get('soulVersions', {}).get('global', 3)}.{agent.get('soulVersions', {}).get('position', 1)}.{agent.get('soulVersions', {}).get('personal', 0)}",
-            "lastActive": "2026-03-20T10:30:00Z",
-            "uptime": "14d 6h",
+            "lastActive": last_active,
+            "uptime": server_uptime,
         })
 
     # System-level metrics
+    all_requests = [usage_map.get(a["id"], {}).get("requests", 0) for a in agents]
+    total_blocked = sum(e.get("blocked", 0) for e in agent_audit.values())
+    total_success = sum(e.get("success", 0) for e in agent_audit.values())
+    total_audit_all = total_blocked + total_success
+    overall_tool_success = round(
+        (total_success / total_audit_all * 100) if total_audit_all > 0 else 100.0, 1
+    )
+
+    # p95 response time: 95th percentile across all known durations
+    all_durations = [ms for dlist in total_duration_ms.values() for ms in dlist]
+    if all_durations:
+        all_durations.sort()
+        p95_idx = int(len(all_durations) * 0.95)
+        p95_resp = round(all_durations[min(p95_idx, len(all_durations) - 1)] / 1000, 1)
+    else:
+        p95_resp = None
+
+    gateway_status = _check_gateway_status()
+    bedrock_ms = _measure_bedrock_latency()
+
     system = {
         "totalAgents": len(agents),
         "activeAgents": sum(1 for a in agents if a.get("status") == "active"),
         "avgQuality": round(sum(a.get("qualityScore") or 0 for a in agents) / max(1, len([a for a in agents if a.get("qualityScore")])), 1),
-        "totalRequestsToday": sum(usage_map.get(a["id"], {}).get("requests", 0) for a in agents),
+        "totalRequestsToday": sum(all_requests),
         "totalCostToday": round(sum(usage_map.get(a["id"], {}).get("cost", 0) for a in agents), 2),
-        "p95ResponseSec": 4.2,
-        "overallToolSuccess": 96,
-        "gatewayStatus": "healthy",
-        "agentCoreStatus": "healthy",
-        "bedrockLatencyMs": 245,
+        "p95ResponseSec": p95_resp,
+        "overallToolSuccess": overall_tool_success,
+        "gatewayStatus": gateway_status,
+        "agentCoreStatus": "healthy",  # AgentCore status requires control-plane API; show healthy unless errors seen
+        "bedrockLatencyMs": bedrock_ms if bedrock_ms else None,
     }
 
     return {"agents": agent_health, "system": system}
@@ -2341,16 +2516,13 @@ def dashboard(authorization: str = Header(default="")):
 
 def _get_agent_usage_today() -> dict:
     """Aggregate today's usage per agent from DynamoDB USAGE# records.
-    Reads today's date dynamically. Falls back to seed date if no data found."""
-    from datetime import date as _date
+    Reads today's date dynamically. Also merges the last 6 days to capture
+    recent real usage (Discord, Portal, Telegram) that may land on different dates."""
+    from datetime import date as _date, timedelta
     today = _date.today().isoformat()
     all_usage = db.get_usage_by_date(today)
-    # Fallback: if no data for today, try seed date (demo mode)
-    if not all_usage:
-        all_usage = db.get_usage_by_date("2026-03-20")
-    # Also merge any other recent dates to capture real Discord usage
+    # Merge recent days to capture real usage — but never fall back to hard-coded seed dates
     for offset in range(1, 7):
-        from datetime import timedelta
         past = (_date.today() - timedelta(days=offset)).isoformat()
         past_usage = db.get_usage_by_date(past)
         for u in past_usage:
@@ -2489,24 +2661,36 @@ def usage_for_agent(agent_id: str):
 
 @app.get("/api/v1/usage/trend")
 def usage_trend():
-    """7-day cost trend from DynamoDB."""
+    """7-day cost trend from DynamoDB.
+    chatgptEquivalent: computed from active employee count if not stored per-day."""
+    employees = db.get_employees()
+    # ChatGPT Team $25/user/month ≈ $0.83/user/day
+    chatgpt_daily = round(len([e for e in employees if e.get("agentId")]) * 0.83, 2)
     trend = db.get_cost_trend()
     return [{
         "date": t.get("date"),
         "openclawCost": float(t.get("openclawCost", 0)),
-        "chatgptEquivalent": float(t.get("chatgptEquivalent", 5)),
+        # Use stored value if present; otherwise use employee-count-based estimate
+        "chatgptEquivalent": float(t["chatgptEquivalent"]) if t.get("chatgptEquivalent") else chatgpt_daily,
         "totalRequests": t.get("totalRequests", 0),
     } for t in trend]
 
+def _get_budgets() -> dict:
+    """Load department budgets from DynamoDB CONFIG#budgets; fall back to defaults."""
+    stored = db.get_config("budgets")
+    if stored:
+        # Merge with defaults so new departments always have a fallback
+        merged = dict(_DEFAULT_BUDGETS)
+        merged.update({k: float(v) for k, v in stored.items() if k != "id" and not k.startswith("_")})
+        return merged
+    return dict(_DEFAULT_BUDGETS)
+
+
 @app.get("/api/v1/usage/budgets")
 def usage_budgets():
-    """Department budget tracking."""
+    """Department budget tracking — budgets loaded from DynamoDB CONFIG#budgets."""
     dept_usage = usage_by_department()
-    budgets = {
-        "Engineering": 50.0, "Platform Team": 20.0, "Sales": 30.0,
-        "Product": 25.0, "Finance": 20.0, "HR & Admin": 15.0,
-        "Customer Success": 20.0, "Legal & Compliance": 10.0, "QA Team": 15.0,
-    }
+    budgets = _get_budgets()
     result = []
     for dept in dept_usage:
         budget = budgets.get(dept["department"], 20.0)
@@ -2520,6 +2704,20 @@ def usage_budgets():
             "status": "over" if projected > budget else "warning" if projected > budget * 0.8 else "ok",
         })
     return result
+
+
+class BudgetUpdateRequest(BaseModel):
+    budgets: dict  # {"Engineering": 60.0, "Sales": 35.0, ...}
+
+
+@app.put("/api/v1/usage/budgets")
+def update_budgets(body: BudgetUpdateRequest, authorization: str = Header(default="")):
+    """Save department budget config to DynamoDB. Admin only."""
+    _require_role(authorization, roles=["admin"])
+    merged = _get_budgets()
+    merged.update({k: float(v) for k, v in body.budgets.items()})
+    db.set_config("budgets", merged)
+    return merged
 
 
 # =========================================================================
@@ -2564,6 +2762,13 @@ def set_default_model(body: dict):
     db.set_config("model", config)
     return config["default"]
 
+@app.put("/api/v1/settings/model/fallback")
+def set_fallback_model(body: dict):
+    config = _get_model_config()
+    config["fallback"] = body
+    db.set_config("model", config)
+    return config["fallback"]
+
 @app.put("/api/v1/settings/model/position/{pos_id}")
 def set_position_model(pos_id: str, body: dict):
     config = _get_model_config()
@@ -2591,12 +2796,74 @@ def update_security_config(body: dict):
 
 @app.get("/api/v1/settings/services")
 def get_services():
+    uptime_str = _format_uptime(time.time() - _SERVER_START_TIME)
+
+    # Gateway: try to ping, measure latency
+    gw_status = _check_gateway_status()
+
+    # Requests today: count agent_invocation audit entries from today
+    from datetime import date as _date
+    today_str = _date.today().isoformat()
+    audit_entries = db.get_audit_entries(limit=500)
+    requests_today = sum(
+        1 for e in audit_entries
+        if e.get("eventType") == "agent_invocation"
+        and e.get("timestamp", "").startswith(today_str)
+    )
+
+    # Approvals processed: count all non-pending approvals
+    approvals = db.get_approvals()
+    approvals_processed = sum(1 for a in approvals if a.get("status") in ("approved", "denied"))
+
+    # Bedrock: measure real latency
+    bedrock_ms = _measure_bedrock_latency()
+    bedrock_status = "connected" if bedrock_ms > 0 else "unreachable"
+
+    # DynamoDB: get real item count via a lightweight describe (scan is expensive; use table meta)
+    ddb_item_count = 0
+    ddb_status = "unknown"
+    try:
+        import boto3 as _b3_svc
+        table_meta = _b3_svc.resource("dynamodb", region_name=db.AWS_REGION).Table(db.TABLE_NAME)
+        table_meta.load()
+        ddb_item_count = table_meta.item_count or 0
+        ddb_status = "active"
+    except Exception:
+        ddb_status = "unreachable"
+
+    # S3: quick head-bucket check
+    s3_status = "unknown"
+    try:
+        import boto3 as _b3_s3
+        _b3_s3.client("s3").head_bucket(Bucket=s3ops.bucket())
+        s3_status = "active"
+    except Exception:
+        s3_status = "unreachable"
+
     return {
-        "gateway": {"status": "running", "port": 18789, "uptime": "14d 6h 32m", "requestsToday": 176},
-        "auth_agent": {"status": "healthy", "uptime": "14d 6h 32m", "approvalsProcessed": 42},
-        "bedrock": {"status": "connected", "region": AWS_REGION, "latencyMs": 245, "vpcEndpoint": True},
-        "dynamodb": {"status": "active", "table": db.TABLE_NAME, "itemCount": 74},
-        "s3": {"status": "active", "bucket": s3ops.bucket()},
+        "gateway": {
+            "status": gw_status,
+            "port": 18789,
+            "uptime": uptime_str,
+            "requestsToday": requests_today,
+        },
+        "auth_agent": {
+            "status": "healthy",
+            "uptime": uptime_str,
+            "approvalsProcessed": approvals_processed,
+        },
+        "bedrock": {
+            "status": bedrock_status,
+            "region": AWS_REGION,
+            "latencyMs": bedrock_ms if bedrock_ms else None,
+            "vpcEndpoint": True,
+        },
+        "dynamodb": {
+            "status": ddb_status,
+            "table": db.TABLE_NAME,
+            "itemCount": ddb_item_count,
+        },
+        "s3": {"status": s3_status, "bucket": s3ops.bucket()},
     }
 
 
@@ -2620,6 +2887,381 @@ if DIST_DIR.exists():
         # For API 404s, return JSON
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+
+# =========================================================================
+# Admin AI Assistant — Claude via Bedrock Converse API + whitelist tools
+# No shell, no subprocess, no OpenClaw. Bounded read/write via Python fns.
+# =========================================================================
+
+_ADMIN_AI_MODEL = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+_ADMIN_AI_SYSTEM = """You are the IT Admin Assistant for OpenClaw Enterprise. You help administrators query and configure the platform.
+
+You have access to specific tools to read and modify platform data. Use them to answer questions accurately.
+- For data queries, always use the appropriate tool rather than guessing.
+- For write operations (update_soul_template), confirm what you're about to change before calling the tool if the intent isn't crystal clear.
+- Respond in the same language the user writes in.
+- Be concise. Show data in structured format (tables or lists) when useful.
+- You cannot execute shell commands or access the EC2 directly. All operations go through the defined tools."""
+
+# Per-admin conversation history (in-memory, resets on server restart)
+_admin_ai_history: dict[str, list] = {}
+
+_ADMIN_AI_TOOLS = [
+    {
+        "name": "list_employees",
+        "description": "List employees, optionally filtered by department_id or position_id. Returns id, name, position, department, agent status, channels.",
+        "inputSchema": {"json": {"type": "object", "properties": {
+            "department_id": {"type": "string"},
+            "position_id": {"type": "string"},
+        }}}
+    },
+    {
+        "name": "get_employee_detail",
+        "description": "Get full details for one employee: profile, agent config, bindings, recent usage.",
+        "inputSchema": {"json": {"type": "object", "required": ["employee_id"], "properties": {
+            "employee_id": {"type": "string", "description": "e.g. emp-carol"},
+        }}}
+    },
+    {
+        "name": "get_soul_template",
+        "description": "Read a SOUL template from S3. scope=global reads the locked global SOUL. scope=position reads a position template (requires position_id). scope=personal reads an employee's personal SOUL (requires employee_id).",
+        "inputSchema": {"json": {"type": "object", "required": ["scope"], "properties": {
+            "scope": {"type": "string", "enum": ["global", "position", "personal"]},
+            "position_id": {"type": "string"},
+            "employee_id": {"type": "string"},
+        }}}
+    },
+    {
+        "name": "update_soul_template",
+        "description": "Write a SOUL template to S3. Only position and personal scope are writable. Global is locked. Creates an audit log entry automatically.",
+        "inputSchema": {"json": {"type": "object", "required": ["scope", "content"], "properties": {
+            "scope": {"type": "string", "enum": ["position", "personal"]},
+            "position_id": {"type": "string"},
+            "employee_id": {"type": "string"},
+            "content": {"type": "string"},
+        }}}
+    },
+    {
+        "name": "list_departments_and_positions",
+        "description": "List all departments and positions with member counts and default channels.",
+        "inputSchema": {"json": {"type": "object", "properties": {}}}
+    },
+    {
+        "name": "get_agent_detail",
+        "description": "Get agent configuration, SOUL versions, skills, channels, and today's usage.",
+        "inputSchema": {"json": {"type": "object", "properties": {
+            "agent_id": {"type": "string"},
+            "employee_id": {"type": "string", "description": "Alternative lookup by employee"},
+        }}}
+    },
+    {
+        "name": "get_usage_report",
+        "description": "Get token usage and cost data. scope=summary gives org total, scope=by_department breaks down by dept, scope=by_agent lists per-agent stats.",
+        "inputSchema": {"json": {"type": "object", "required": ["scope"], "properties": {
+            "scope": {"type": "string", "enum": ["summary", "by_department", "by_agent"]},
+        }}}
+    },
+    {
+        "name": "get_service_health",
+        "description": "Check health of all platform services: Gateway, Admin Console, Tenant Router, Bedrock, DynamoDB, S3.",
+        "inputSchema": {"json": {"type": "object", "properties": {}}}
+    },
+    {
+        "name": "get_audit_log",
+        "description": "Query recent audit log entries. Optionally filter by employee_id or event_type.",
+        "inputSchema": {"json": {"type": "object", "properties": {
+            "employee_id": {"type": "string"},
+            "event_type": {"type": "string", "enum": ["agent_invocation", "permission_denied", "config_change", "approval_decision"]},
+            "limit": {"type": "integer", "default": 20},
+        }}}
+    },
+    {
+        "name": "list_bindings",
+        "description": "List IM channel bindings. Optionally filter by employee_id or channel name.",
+        "inputSchema": {"json": {"type": "object", "properties": {
+            "employee_id": {"type": "string"},
+            "channel": {"type": "string"},
+        }}}
+    },
+]
+
+
+def _execute_admin_tool(name: str, inputs: dict, actor_id: str, actor_name: str) -> str:
+    """Execute one whitelisted admin tool. Returns result as string for Claude."""
+    try:
+        if name == "list_employees":
+            emps = db.get_employees()
+            if inputs.get("department_id"):
+                emps = [e for e in emps if e.get("departmentId") == inputs["department_id"]]
+            if inputs.get("position_id"):
+                emps = [e for e in emps if e.get("positionId") == inputs["position_id"]]
+            rows = [f"- {e['id']} | {e['name']} | {e.get('positionName','')} | {e.get('departmentName','')} | agent={'yes' if e.get('agentId') else 'no'} | channels={','.join(e.get('channels',[]))}"
+                    for e in emps]
+            return f"{len(emps)} employees:\n" + "\n".join(rows)
+
+        elif name == "get_employee_detail":
+            emp_id = inputs["employee_id"]
+            emps = db.get_employees()
+            emp = next((e for e in emps if e["id"] == emp_id or e.get("name") == emp_id), None)
+            if not emp:
+                return f"Employee '{emp_id}' not found."
+            agent = db.get_agent(emp.get("agentId", "")) if emp.get("agentId") else None
+            bindings = [b for b in db.get_bindings() if b.get("employeeId") == emp["id"]]
+            usage = _get_agent_usage_today().get(emp.get("agentId", ""), {})
+            lines = [
+                f"**{emp['name']}** ({emp['id']})",
+                f"Position: {emp.get('positionName','')} | Dept: {emp.get('departmentName','')} | Role: {emp.get('role','')}",
+                f"Channels: {', '.join(emp.get('channels', []))}",
+                f"Agent: {emp.get('agentId', 'none')} | Status: {agent.get('status','') if agent else 'no agent'}",
+                f"Skills: {', '.join(agent.get('skills',[]) if agent else [])}",
+                f"Bindings: {len(bindings)} ({', '.join(b.get('channel','') for b in bindings)})",
+                f"Today usage: {usage.get('requests',0)} requests, ${usage.get('cost',0):.4f}",
+            ]
+            if agent:
+                sv = agent.get("soulVersions") or {}
+                lines.append(f"SOUL versions: global=v{sv.get('global',0)} position=v{sv.get('position',0)} personal=v{sv.get('personal',0)}")
+            return "\n".join(lines)
+
+        elif name == "get_soul_template":
+            scope = inputs["scope"]
+            if scope == "global":
+                content = s3ops.read_file("_shared/soul/global/SOUL.md") or "(empty)"
+                return f"**Global SOUL** (locked):\n\n{content[:3000]}"
+            elif scope == "position":
+                pos_id = inputs.get("position_id", "")
+                if not pos_id:
+                    return "position_id required for scope=position"
+                content = s3ops.read_file(f"_shared/soul/positions/{pos_id}/SOUL.md") or "(not set)"
+                return f"**Position SOUL [{pos_id}]**:\n\n{content[:3000]}"
+            elif scope == "personal":
+                emp_id = inputs.get("employee_id", "")
+                if not emp_id:
+                    return "employee_id required for scope=personal"
+                content = s3ops.read_file(f"{emp_id}/workspace/SOUL.md") or "(not set)"
+                return f"**Personal SOUL [{emp_id}]**:\n\n{content[:3000]}"
+
+        elif name == "update_soul_template":
+            scope = inputs["scope"]
+            content = inputs["content"]
+            if scope == "global":
+                return "❌ Global SOUL is locked and cannot be modified."
+            elif scope == "position":
+                pos_id = inputs.get("position_id", "")
+                if not pos_id:
+                    return "position_id required for scope=position"
+                s3ops.write_file(f"_shared/soul/positions/{pos_id}/SOUL.md", content)
+                db.create_audit_entry({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "eventType": "config_change", "actorId": actor_id, "actorName": actor_name,
+                    "targetType": "soul", "targetId": pos_id,
+                    "detail": f"Admin AI updated position SOUL for {pos_id} ({len(content)} chars)",
+                    "status": "success",
+                })
+                return f"✅ Position SOUL for {pos_id} updated ({len(content)} chars). Agents will get it on next workspace assembly."
+            elif scope == "personal":
+                emp_id = inputs.get("employee_id", "")
+                if not emp_id:
+                    return "employee_id required for scope=personal"
+                s3ops.write_file(f"{emp_id}/workspace/SOUL.md", content)
+                db.create_audit_entry({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "eventType": "config_change", "actorId": actor_id, "actorName": actor_name,
+                    "targetType": "soul", "targetId": emp_id,
+                    "detail": f"Admin AI updated personal SOUL for {emp_id} ({len(content)} chars)",
+                    "status": "success",
+                })
+                return f"✅ Personal SOUL for {emp_id} updated ({len(content)} chars)."
+
+        elif name == "list_departments_and_positions":
+            depts = db.get_departments()
+            positions = db.get_positions()
+            lines = ["**Departments:**"]
+            for d in depts:
+                lines.append(f"  {d['id']} | {d['name']} | head: {d.get('headName','')} | members: {d.get('headCount',0)}")
+            lines.append("\n**Positions:**")
+            for p in positions:
+                lines.append(f"  {p['id']} | {p['name']} | dept: {p.get('departmentName','')} | channel: {p.get('defaultChannel','')} | members: {p.get('employeeCount',0)}")
+            return "\n".join(lines)
+
+        elif name == "get_agent_detail":
+            agents = db.get_agents()
+            agent = None
+            if inputs.get("agent_id"):
+                agent = next((a for a in agents if a["id"] == inputs["agent_id"]), None)
+            elif inputs.get("employee_id"):
+                agent = next((a for a in agents if a.get("employeeId") == inputs["employee_id"]), None)
+            if not agent:
+                return "Agent not found."
+            usage = _get_agent_usage_today().get(agent["id"], {})
+            sv = agent.get("soulVersions") or {}
+            lines = [
+                f"**{agent['name']}** ({agent['id']})",
+                f"Employee: {agent.get('employeeName','')} | Position: {agent.get('positionName','')}",
+                f"Status: {agent.get('status','')} | Quality: {agent.get('qualityScore','—')}",
+                f"Channels: {', '.join(agent.get('channels',[]))}",
+                f"Skills: {', '.join(agent.get('skills',[]))}",
+                f"SOUL: global=v{sv.get('global',0)} position=v{sv.get('position',0)} personal=v{sv.get('personal',0)}",
+                f"Today: {usage.get('requests',0)} reqs, ${usage.get('cost',0):.4f}, model={usage.get('model','')}",
+            ]
+            return "\n".join(lines)
+
+        elif name == "get_usage_report":
+            scope = inputs["scope"]
+            if scope == "summary":
+                s = usage_summary()
+                return (f"Input: {s['totalInputTokens']:,} tokens\n"
+                        f"Output: {s['totalOutputTokens']:,} tokens\n"
+                        f"Cost today: ${s['totalCost']:.4f}\n"
+                        f"Requests: {s['totalRequests']}\n"
+                        f"Active tenants: {s['tenantCount']}\n"
+                        f"vs ChatGPT equivalent: ${s['chatgptEquivalent']:.2f}/day")
+            elif scope == "by_department":
+                rows = usage_by_department()
+                lines = [f"{'Dept':<25} {'Agents':>6} {'Reqs':>6} {'Tokens':>8} {'Cost':>8}"]
+                lines.append("-" * 58)
+                for r in rows:
+                    lines.append(f"{r['department']:<25} {r['agents']:>6} {r['requests']:>6} {(r['inputTokens']+r['outputTokens'])//1000:>7}k ${r['cost']:>6.2f}")
+                return "\n".join(lines)
+            elif scope == "by_agent":
+                rows = usage_by_agent()
+                lines = [f"{'Agent':<30} {'Reqs':>5} {'Cost':>7}"]
+                for r in rows[:20]:
+                    lines.append(f"{r['agentName'][:30]:<30} {r['requests']:>5} ${r['cost']:>5.2f}")
+                return "\n".join(lines)
+
+        elif name == "get_service_health":
+            svc = get_services()
+            lines = []
+            for name_svc, info in svc.items():
+                status = info.get("status", "unknown")
+                icon = "✅" if status in ("healthy", "active", "running", "connected") else "⚠️"
+                extra = ""
+                if name_svc == "gateway":
+                    extra = f" | port {info.get('port','')} | {info.get('requestsToday',0)} reqs today"
+                elif name_svc == "bedrock":
+                    ms = info.get("latencyMs")
+                    extra = f" | {info.get('region','')} | {ms}ms" if ms else f" | {info.get('region','')}"
+                elif name_svc == "dynamodb":
+                    extra = f" | {info.get('table','')} | {info.get('itemCount',0)} items"
+                elif name_svc == "s3":
+                    extra = f" | {info.get('bucket','')}"
+                lines.append(f"{icon} **{name_svc}**: {status}{extra}")
+            return "\n".join(lines)
+
+        elif name == "get_audit_log":
+            limit = min(int(inputs.get("limit", 20)), 50)
+            entries = db.get_audit_entries(limit=limit)
+            if inputs.get("employee_id"):
+                entries = [e for e in entries if e.get("actorId") == inputs["employee_id"]]
+            if inputs.get("event_type"):
+                entries = [e for e in entries if e.get("eventType") == inputs["event_type"]]
+            entries = entries[:limit]
+            lines = []
+            for e in entries:
+                ts = e.get("timestamp", "")[:16].replace("T", " ")
+                lines.append(f"{ts} | {e.get('eventType','')} | {e.get('actorName','')} | {e.get('detail','')[:60]}")
+            return f"{len(lines)} entries:\n" + "\n".join(lines) if lines else "No entries found."
+
+        elif name == "list_bindings":
+            bindings = db.get_bindings()
+            if inputs.get("employee_id"):
+                bindings = [b for b in bindings if b.get("employeeId") == inputs["employee_id"]]
+            if inputs.get("channel"):
+                bindings = [b for b in bindings if b.get("channel") == inputs["channel"]]
+            lines = [f"- {b.get('employeeName','')} ({b.get('employeeId','')}) | {b.get('channel','')} | {b.get('status','')} | agent: {b.get('agentId','')}"
+                     for b in bindings]
+            return f"{len(bindings)} bindings:\n" + "\n".join(lines)
+
+        return f"Unknown tool: {name}"
+
+    except Exception as e:
+        return f"Tool error ({name}): {e}"
+
+
+def _admin_ai_loop(history: list, user) -> str:
+    """Agentic loop: call Claude with tools, execute tool_use responses, repeat until text."""
+    import boto3 as _b3_ai
+    client = _b3_ai.client("bedrock-runtime", region_name=AWS_REGION)
+
+    messages = list(history)  # shallow copy
+
+    for _ in range(8):  # max 8 tool-use rounds
+        try:
+            resp = client.converse(
+                modelId=_ADMIN_AI_MODEL,
+                system=[{"text": _ADMIN_AI_SYSTEM}],
+                messages=messages,
+                toolConfig={"tools": [{"toolSpec": t} for t in _ADMIN_AI_TOOLS]},
+                inferenceConfig={"maxTokens": 2048, "temperature": 0.2},
+            )
+        except Exception as e:
+            return f"⚠️ AI error: {e}"
+
+        stop_reason = resp.get("stopReason", "")
+        output_msg = resp.get("output", {}).get("message", {})
+        content_blocks = output_msg.get("content", [])
+
+        # Collect text and tool_use blocks
+        text_parts = []
+        tool_uses = []
+        for block in content_blocks:
+            if block.get("text"):
+                text_parts.append(block["text"])
+            if block.get("toolUse"):
+                tool_uses.append(block["toolUse"])
+
+        if stop_reason == "end_turn" or not tool_uses:
+            return " ".join(text_parts) or "(no response)"
+
+        # Execute all tool calls
+        messages.append({"role": "assistant", "content": content_blocks})
+        tool_results = []
+        for tu in tool_uses:
+            result = _execute_admin_tool(tu["name"], tu.get("input", {}), user.employee_id, user.name)
+            tool_results.append({
+                "toolResult": {
+                    "toolUseId": tu["toolUseId"],
+                    "content": [{"text": result}],
+                }
+            })
+        messages.append({"role": "user", "content": tool_results})
+
+    return "⚠️ Reached maximum tool-use rounds."
+
+
+class AdminAiMessage(BaseModel):
+    message: str
+
+
+@app.post("/api/v1/admin-ai/chat")
+def admin_ai_chat(body: AdminAiMessage, authorization: str = Header(default="")):
+    """Admin AI assistant — Claude via Bedrock + whitelist tools. Admin only."""
+    user = _require_role(authorization, roles=["admin"])
+
+    # Get or init per-admin history
+    history = _admin_ai_history.setdefault(user.employee_id, [])
+    # Bedrock Converse API requires content as list of blocks
+    history.append({"role": "user", "content": [{"text": body.message}]})
+
+    # Trim to last 20 messages to stay within token limits
+    if len(history) > 20:
+        _admin_ai_history[user.employee_id] = history[-20:]
+        history = _admin_ai_history[user.employee_id]
+
+    response_text = _admin_ai_loop(history, user)
+    history.append({"role": "assistant", "content": [{"text": response_text}]})
+
+    return {"response": response_text}
+
+
+@app.delete("/api/v1/admin-ai/chat")
+def admin_ai_clear(authorization: str = Header(default="")):
+    """Clear conversation history for the current admin."""
+    user = _require_role(authorization, roles=["admin"])
+    _admin_ai_history.pop(user.employee_id, None)
+    return {"cleared": True}
 
 
 # =========================================================================
