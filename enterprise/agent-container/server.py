@@ -320,51 +320,6 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
         logger.info("Workspace ready for tenant %s", tenant_id)
 
 
-def _append_memory_turn(base_id: str, user_msg: str, assistant_msg: str) -> None:
-    """Append a conversation turn to MEMORY.md for cross-session persistence.
-
-    Called after each successful invocation. The watchdog syncs MEMORY.md to S3
-    every 60s, so the next microVM loading this tenant's workspace will have history.
-    """
-    from datetime import datetime, timezone
-
-    memory_path = os.path.join(WORKSPACE, "MEMORY.md")
-    try:
-        now = datetime.now(timezone.utc)
-        date_str = now.strftime("%Y-%m-%d %H:%M UTC")
-
-        u = user_msg[:300] + ("..." if len(user_msg) > 300 else "")
-        a = assistant_msg[:600] + ("..." if len(assistant_msg) > 600 else "")
-        entry = f"\n## {date_str}\n**User:** {u}\n**Assistant:** {a}\n"
-
-        if os.path.isfile(memory_path):
-            with open(memory_path, "r") as f:
-                content = f.read()
-        else:
-            content = "# Memory\n"
-
-        if not content.strip().startswith("# Memory"):
-            content = "# Memory\n" + content
-
-        # Remove placeholder on first real write
-        content = content.replace("\nNo previous conversations recorded.\n", "\n")
-        content = content.replace("\nNo previous conversations recorded.", "\n")
-
-        new_content = content.rstrip() + "\n" + entry
-
-        # Cap at ~200 lines to prevent unbounded growth
-        lines = new_content.splitlines()
-        if len(lines) > 200:
-            lines = [lines[0]] + lines[-190:]
-            new_content = "\n".join(lines) + "\n"
-
-        with open(memory_path, "w") as f:
-            f.write(new_content)
-
-        logger.info("Memory appended for base=%s chars=%d", base_id, len(new_content))
-    except Exception as e:
-        logger.warning("Memory append failed (non-fatal): %s", e)
-
 
 def _build_system_prompt(tenant_id: str) -> str:
     """Plan A: build constraint text to prepend to SOUL.md."""
@@ -642,9 +597,6 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
                         base_id = resolved
             except Exception:
                 pass
-
-            # Persist conversation turn to MEMORY.md (watchdog syncs to S3 every 60s)
-            _append_memory_turn(base_id, message, response_text)
 
             threading.Thread(
                 target=_write_usage_to_dynamodb,

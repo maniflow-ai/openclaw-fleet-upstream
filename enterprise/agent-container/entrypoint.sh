@@ -61,6 +61,24 @@ sed -e "s|\${AWS_REGION}|${AWS_REGION}|g" \
 echo "[entrypoint] openclaw.json written to $OPENCLAW_CONFIG_DIR/openclaw.json"
 
 # =============================================================================
+# Step 0.6: Start OpenClaw Gateway — native session management + memory
+# Gateway must run BEFORE server.py so OpenClaw agent CLI can connect to it.
+# Without Gateway, OpenClaw falls back to embedded mode (no memory compaction).
+# =============================================================================
+openclaw gateway --port 18789 > /tmp/openclaw-gateway.log 2>&1 &
+GATEWAY_PID=$!
+echo "[entrypoint] OpenClaw Gateway PID=${GATEWAY_PID}"
+
+# Wait up to 20s for Gateway to start listening (V8 cache makes this ~2-3s)
+for i in $(seq 1 20); do
+    if ss -tlnp 2>/dev/null | grep -q ":18789"; then
+        echo "[entrypoint] Gateway ready on port 18789 (${i}s)"
+        break
+    fi
+    sleep 1
+done
+
+# =============================================================================
 # Step 1: Start server.py IMMEDIATELY — health check must respond in seconds
 # =============================================================================
 export OPENCLAW_WORKSPACE="$WORKSPACE"
@@ -172,6 +190,7 @@ echo "[entrypoint] Background sync PID=${BG_PID}"
 # =============================================================================
 cleanup() {
     echo "[entrypoint] SIGTERM — flushing workspace"
+    kill "$GATEWAY_PID" 2>/dev/null || true
     kill "$BG_PID" 2>/dev/null || true
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
