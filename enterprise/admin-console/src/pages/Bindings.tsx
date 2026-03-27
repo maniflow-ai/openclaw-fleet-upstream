@@ -1,9 +1,71 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { Link2, Plus, Users, User, GitBranch, Smartphone, Trash2 } from 'lucide-react';
 import { Card, StatCard, Badge, Button, PageHeader, Table, Modal, Select, Tabs, StatusDot } from '../components/ui';
 import { useBindings, useEmployees, useAgents, usePositions, useCreateBinding, useBulkProvision, useRoutingRules, useUserMappings, useCreateUserMapping, useDeleteUserMapping, useApprovePairing } from '../hooks/useApi';
 import { CHANNEL_LABELS } from '../types';
 import type { Binding, ChannelType } from '../types';
+
+// Inline component for IM mapping table with per-row confirm-to-revoke
+function RevokeTable({ mappings, employees, onRevoke, isPending }: {
+  mappings: any[];
+  employees: any[];
+  onRevoke: (r: any) => void;
+  isPending: boolean;
+}) {
+  const [confirming, setConfirming] = useState<string | null>(null);
+
+  const key = useCallback((r: any) => `${r.channel}__${r.channelUserId}`, []);
+
+  const channelIcon: Record<string, string> = {
+    telegram: '✈️', discord: '🎮', slack: '💬',
+    whatsapp: '📱', wechat: '🟢', feishu: '🪶',
+  };
+
+  return (
+    <div className="space-y-2">
+      {mappings.map(r => {
+        const emp = employees.find((e: any) => e.id === r.employeeId);
+        const rKey = key(r);
+        const isConfirming = confirming === rKey;
+        return (
+          <div key={rKey} className="flex items-center gap-3 rounded-lg bg-dark-bg border border-dark-border/40 px-4 py-2.5">
+            <span className="text-lg">{channelIcon[r.channel] || '💬'}</span>
+            <Badge color="info" >{r.channel}</Badge>
+            <code className="text-xs text-text-secondary bg-dark-hover px-2 py-0.5 rounded flex-shrink-0">
+              {r.channelUserId}
+            </code>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-text-primary truncate">
+                {emp?.name || r.employeeId}
+              </p>
+              {emp && <p className="text-xs text-text-muted truncate">{emp.positionName}</p>}
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              {isConfirming ? (
+                <>
+                  <span className="text-xs text-danger">Revoke access?</span>
+                  <Button variant="danger" size="sm" disabled={isPending}
+                    onClick={() => { onRevoke(r); setConfirming(null); }}>
+                    Confirm
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => setConfirming(null)}>
+                    Cancel
+                  </Button>
+                </>
+              ) : (
+                <Button variant="ghost" size="sm"
+                  className="text-text-muted hover:text-danger hover:border-danger/30"
+                  onClick={() => setConfirming(rKey)}>
+                  <Trash2 size={13} /> Revoke
+                </Button>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 export default function Bindings() {
   const { data: BINDINGS = [] } = useBindings();
@@ -140,20 +202,11 @@ export default function Bindings() {
                   <p className="text-xs mt-1">Add mappings so the system knows which employee is behind each IM account.</p>
                 </div>
               ) : (
-                <Table
-                  columns={[
-                    { key: 'channel', label: 'Channel', render: (r: typeof userMappings[0]) => <Badge color="info">{r.channel}</Badge> },
-                    { key: 'channelUserId', label: 'Platform User ID', render: (r: typeof userMappings[0]) => <code className="text-xs bg-dark-bg px-2 py-0.5 rounded">{r.channelUserId}</code> },
-                    { key: 'employeeId', label: 'Employee', render: (r: typeof userMappings[0]) => {
-                      const emp = EMPLOYEES.find(e => e.id === r.employeeId);
-                      return <span className="font-medium">{emp?.name || r.employeeId}</span>;
-                    }},
-                    { key: 'actions', label: '', render: (r: typeof userMappings[0]) => (
-                      <button onClick={() => deleteUserMapping.mutate({ channel: r.channel, channelUserId: r.channelUserId })}
-                        className="text-text-muted hover:text-danger transition-colors"><Trash2 size={14} /></button>
-                    )},
-                  ]}
-                  data={userMappings}
+                <RevokeTable
+                  mappings={userMappings}
+                  employees={EMPLOYEES}
+                  onRevoke={(r) => deleteUserMapping.mutate({ channel: r.channel, channelUserId: r.channelUserId })}
+                  isPending={deleteUserMapping.isPending}
                 />
               )}
             </div>
