@@ -33,6 +33,30 @@ AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 RUNTIME_ID = os.environ.get("AGENTCORE_RUNTIME_ID", "")
 ROUTER_PORT = int(os.environ.get("ROUTER_PORT", "8090"))
 
+# Per-tenant runtime override cache (TTL 5 min to avoid SSM call every message)
+_runtime_cache: dict = {}
+_runtime_cache_ts: dict = {}
+_RUNTIME_CACHE_TTL = 300  # seconds
+
+
+def _get_runtime_id_for_tenant(base_id: str) -> str:
+    """Look up per-tenant runtime override from SSM. Falls back to default RUNTIME_ID.
+    Used to route executive employees to the Executive Runtime."""
+    import time
+    now = time.time()
+    if base_id in _runtime_cache and now - _runtime_cache_ts.get(base_id, 0) < _RUNTIME_CACHE_TTL:
+        return _runtime_cache[base_id]
+    try:
+        ssm = boto3.client("ssm", region_name=AWS_REGION)
+        resp = ssm.get_parameter(Name=f"/openclaw/{STACK_NAME}/tenants/{base_id}/runtime-id")
+        runtime = resp["Parameter"]["Value"]
+        _runtime_cache[base_id] = runtime
+        _runtime_cache_ts[base_id] = now
+        logger.info("Runtime override for %s → %s", base_id, runtime)
+        return runtime
+    except Exception:
+        return RUNTIME_ID
+
 # Tenant ID validation: alphanumeric, underscores, hyphens, dots
 _TENANT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_.\-]{1,128}$")
 
@@ -128,13 +152,18 @@ def invoke_agent_runtime(
         return _invoke_local_container(local_url, tenant_id, message, model)
 
     # Production mode: call AgentCore Runtime API
-    if not RUNTIME_ID:
+    # Check for per-tenant runtime override (e.g. Executive Runtime for pos-exec)
+    parts = tenant_id.split("__")
+    base_id = parts[1] if len(parts) >= 2 else tenant_id
+    effective_runtime = _get_runtime_id_for_tenant(base_id) or RUNTIME_ID
+
+    if not effective_runtime:
         raise RuntimeError(
             "AGENTCORE_RUNTIME_ID not configured. "
             "Set it in SSM or environment after creating the AgentCore Runtime."
         )
 
-    return _invoke_agentcore(tenant_id, message, model)
+    return _invoke_agentcore(tenant_id, message, model, runtime_id_override=effective_runtime)
 
 
 def _invoke_local_container(
@@ -177,8 +206,10 @@ def _invoke_local_container(
         raise RuntimeError(f"Agent Container not reachable at {base_url}: {e}") from e
 
 
-def _invoke_agentcore(tenant_id: str, message: str, model: Optional[str]) -> dict:
-    """Call AgentCore Runtime API (production mode)."""
+def _invoke_agentcore(tenant_id: str, message: str, model: Optional[str],
+                      runtime_id_override: Optional[str] = None) -> dict:
+    """Call AgentCore Runtime API (production mode).
+    runtime_id_override allows routing to a different runtime (e.g. Executive Runtime)."""
     import json as _json
 
     payload = {
@@ -188,14 +219,16 @@ def _invoke_agentcore(tenant_id: str, message: str, model: Optional[str]) -> dic
     if model:
         payload["model"] = model
 
+    effective_runtime_id = runtime_id_override or RUNTIME_ID
+
     # Get the Runtime ARN — construct from known pattern to avoid needing control plane permissions
-    runtime_arn = os.environ.get("AGENTCORE_RUNTIME_ARN", "")
+    runtime_arn = os.environ.get("AGENTCORE_RUNTIME_ARN", "") if not runtime_id_override else ""
     if not runtime_arn:
         # Construct ARN from runtime ID + region + account
         try:
             sts = boto3.client("sts", region_name=AWS_REGION)
             account_id = sts.get_caller_identity()["Account"]
-            runtime_arn = f"arn:aws:bedrock-agentcore:{AWS_REGION}:{account_id}:runtime/{RUNTIME_ID}"
+            runtime_arn = f"arn:aws:bedrock-agentcore:{AWS_REGION}:{account_id}:runtime/{effective_runtime_id}"
             logger.info("Constructed runtime ARN: %s", runtime_arn)
         except Exception as e:
             logger.error("Could not construct runtime ARN: %s", e)
