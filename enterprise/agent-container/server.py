@@ -350,7 +350,9 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
             try:
                 profile = read_permission_profile(tenant_id)
                 is_exec = profile.get("role") == "exec" or profile.get("profile") == "exec"
-                if not is_exec:
+                # Detect digital twin channel (twin__emp_id__...)
+                is_twin = tenant_id.startswith("twin__")
+                if not is_exec and not is_twin:
                     constraint = _build_system_prompt(tenant_id)
                     if constraint:
                         with open(soul_path, "r") as f:
@@ -359,6 +361,30 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
                             with open(soul_path, "w") as f:
                                 f.write(f"<!-- PLAN A: PERMISSION ENFORCEMENT -->\n{constraint}\n\n---\n\n{existing}")
                             logger.info("Plan A constraints injected into SOUL.md for %s", tenant_id)
+                elif is_twin:
+                    # Digital twin mode: inject representative persona context
+                    with open(soul_path, "r") as f:
+                        existing = f.read()
+                    if "DIGITAL TWIN MODE" not in existing:
+                        # Extract employee name from workspace files
+                        user_md_path = os.path.join(WORKSPACE, "USER.md")
+                        user_md = ""
+                        if os.path.isfile(user_md_path):
+                            with open(user_md_path) as f:
+                                user_md = f.read()[:500]
+                        twin_ctx = (
+                            "\n\n<!-- DIGITAL TWIN MODE -->\n"
+                            "You are this employee's AI digital representative. Someone is accessing your owner's digital twin link.\n"
+                            "- Introduce yourself as their AI assistant standing in for them\n"
+                            "- Answer based on their expertise, SOUL profile, and memory\n"
+                            "- If asked where they are: explain they are unavailable but you can help\n"
+                            "- Be warm, professional, and helpful — represent them well\n"
+                            "- Use `web_search` to look up current information when needed\n"
+                            "- Do NOT reveal private/sensitive internal data\n"
+                        )
+                        with open(soul_path, "a") as f:
+                            f.write(twin_ctx)
+                        logger.info("Digital twin context injected for %s", tenant_id)
                 else:
                     logger.info("Plan A skipped for exec profile tenant %s", tenant_id)
             except Exception as e:

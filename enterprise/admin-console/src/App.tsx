@@ -28,6 +28,9 @@ import Approvals from './pages/Approvals';
 import KnowledgeBase from './pages/Knowledge/index';
 import Workspace from './pages/Workspace/index';
 
+// Public pages (no auth required)
+import TwinChat from './pages/TwinChat';
+
 // Portal pages
 import PortalChat from './pages/portal/Chat';
 import PortalProfile from './pages/portal/Profile';
@@ -85,6 +88,9 @@ function AppRoutes() {
       <Route path="/settings" element={user && user.role === 'admin' ? <Layout><Settings /></Layout> : <Navigate to="/login" replace />} />
 
       {/* Catch-all */}
+      {/* Public route — no authentication required */}
+      <Route path="/twin/:token" element={<TwinChat />} />
+
       <Route path="*" element={<Navigate to="/login" replace />} />
     </Routes>
   );

@@ -366,3 +366,60 @@ def get_session_conversation(session_id: str) -> list[dict]:
 def create_session_conversation(session_id: str, messages: list[dict]):
     for i, msg in enumerate(messages):
         _put_item(f"CONV#{session_id}#{i:04d}", {"sessionId": session_id, "seq": i, **msg})
+
+
+# === Digital Twin (public shareable agent URL) ===
+
+def create_twin(emp_id: str, token: str, emp_name: str, position_name: str, agent_name: str) -> dict:
+    """Enable digital twin for an employee — generates a public share token."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    item = {
+        "empId": emp_id,
+        "empName": emp_name,
+        "positionName": position_name,
+        "agentName": agent_name,
+        "token": token,
+        "active": True,
+        "createdAt": now,
+        "viewCount": 0,
+        "chatCount": 0,
+    }
+    # TWIN#token — primary lookup by token
+    _put_item(f"TWIN#{token}", item, f"EMP#{emp_id}", f"TWIN#{token}")
+    # TWINOWNER#emp_id — lookup by employee (only one twin per employee)
+    _put_item(f"TWINOWNER#{emp_id}", {**item, "tokenRef": token}, "TYPE#twin", f"TWINOWNER#{emp_id}")
+    return item
+
+
+def get_twin_by_token(token: str) -> dict | None:
+    return _get_item(f"TWIN#{token}")
+
+
+def get_twin_by_employee(emp_id: str) -> dict | None:
+    return _get_item(f"TWINOWNER#{emp_id}")
+
+
+def disable_twin(emp_id: str) -> None:
+    """Revoke digital twin — mark token inactive and remove owner record."""
+    owner = get_twin_by_employee(emp_id)
+    if owner:
+        token = owner.get("tokenRef") or owner.get("token")
+        if token:
+            item = _get_item(f"TWIN#{token}")
+            if item:
+                _put_item(f"TWIN#{token}", {**item, "active": False}, f"EMP#{emp_id}", f"TWIN#{token}")
+        _get_table().delete_item(Key={"PK": ORG_PK, "SK": f"TWINOWNER#{emp_id}"})
+
+
+def increment_twin_stat(token: str, field: str) -> None:
+    """Increment viewCount or chatCount atomically."""
+    try:
+        _get_table().update_item(
+            Key={"PK": ORG_PK, "SK": f"TWIN#{token}"},
+            UpdateExpression="ADD #f :one",
+            ExpressionAttributeNames={"#f": field},
+            ExpressionAttributeValues={":one": 1},
+        )
+    except Exception:
+        pass

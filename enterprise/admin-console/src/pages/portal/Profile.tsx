@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { User, Bot, Save, Brain, Eye, EyeOff, ChevronDown, ChevronRight } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { User, Bot, Save, Brain, Eye, EyeOff, ChevronDown, ChevronRight, Share2, Copy, Check, Power, ExternalLink } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import { api } from '../../api/client';
 import { Badge, Button, Card, StatusDot } from '../../components/ui';
@@ -29,13 +29,39 @@ export default function PortalProfile() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [showMemory, setShowMemory] = useState(false);
+  const [twin, setTwin] = useState<{ active: boolean; url?: string; chatCount?: number; viewCount?: number } | null>(null);
+  const [twinLoading, setTwinLoading] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     api.get<any>('/portal/profile').then(data => {
       setProfile(data);
       setUserMd(data.userMd || '');
     }).catch(() => {});
+    api.get<any>('/portal/twin').then(setTwin).catch(() => {});
   }, []);
+
+  const handleTwinToggle = useCallback(async () => {
+    setTwinLoading(true);
+    try {
+      if (twin?.active) {
+        await api.del('/portal/twin');
+        setTwin({ active: false });
+      } else {
+        const data = await api.post<any>('/portal/twin', {});
+        setTwin(data);
+      }
+    } catch {}
+    setTwinLoading(false);
+  }, [twin]);
+
+  const handleCopy = useCallback(() => {
+    if (twin?.url) {
+      navigator.clipboard?.writeText(twin.url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  }, [twin?.url]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -145,6 +171,59 @@ export default function PortalProfile() {
                 {profile.memoryPreview}
               </pre>
             )}
+          </div>
+        )}
+      </Card>
+
+      {/* Digital Twin */}
+      <Card>
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <Share2 size={16} className={twin?.active ? 'text-success' : 'text-text-muted'} />
+            <div>
+              <h3 className="text-sm font-semibold text-text-primary">Digital Twin</h3>
+              <p className="text-xs text-text-muted">Share a link so anyone can chat with your AI agent while you're away</p>
+            </div>
+          </div>
+          <button
+            onClick={handleTwinToggle}
+            disabled={twinLoading}
+            className={`relative flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${twin?.active ? 'bg-success' : 'bg-dark-border'} disabled:opacity-50`}
+          >
+            <span className={`absolute left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${twin?.active ? 'translate-x-5' : 'translate-x-0'}`} />
+          </button>
+        </div>
+
+        {twin?.active && twin?.url && (
+          <div className="space-y-3">
+            <div className="rounded-xl bg-success/5 border border-success/20 px-3 py-2.5 flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-success animate-pulse shrink-0" />
+              <p className="text-xs text-success font-medium">Your digital twin is live</p>
+              {twin.viewCount !== undefined && (
+                <span className="text-[10px] text-text-muted ml-auto">{twin.viewCount} views · {twin.chatCount} chats</span>
+              )}
+            </div>
+
+            <div className="rounded-xl bg-dark-bg border border-dark-border/40 px-3 py-2.5 flex items-center gap-2">
+              <p className="flex-1 text-xs font-mono text-text-secondary truncate">{twin.url}</p>
+              <button onClick={handleCopy} className="shrink-0 text-text-muted hover:text-primary transition-colors">
+                {copied ? <Check size={14} className="text-success" /> : <Copy size={14} />}
+              </button>
+              <a href={twin.url} target="_blank" rel="noreferrer" className="shrink-0 text-text-muted hover:text-primary transition-colors">
+                <ExternalLink size={14} />
+              </a>
+            </div>
+
+            <p className="text-[10px] text-text-muted">
+              Anyone with this link can chat with your AI agent. Your agent will respond based on your SOUL profile and memory.
+              Turn off to revoke access immediately.
+            </p>
+          </div>
+        )}
+
+        {!twin?.active && (
+          <div className="rounded-xl bg-surface-dim px-3 py-3 text-xs text-text-muted">
+            When enabled, you get a shareable link. Visitors can ask your AI questions and get responses based on your expertise and memory — useful when you're unavailable.
           </div>
         )}
       </Card>

@@ -305,6 +305,56 @@ def _invoke_agentcore(tenant_id: str, message: str, model: Optional[str],
 
 
 # ---------------------------------------------------------------------------
+# Always-on Docker container routing (Shared / Team Agents)
+# ---------------------------------------------------------------------------
+
+# Cache: agent_id → endpoint URL (http://localhost:PORT)
+_always_on_cache: dict = {}
+_always_on_cache_ts: dict = {}
+_ALWAYS_ON_TTL = 60  # seconds
+
+def _get_always_on_endpoint(user_id: str, channel: str) -> str:
+    """Return the localhost endpoint of an always-on container for this user/agent,
+    or empty string if the user should use AgentCore (normal path).
+
+    Always-on containers are registered in SSM:
+      /openclaw/{stack}/always-on/{agent_id}/endpoint = "http://localhost:PORT"
+    and linked to employees:
+      /openclaw/{stack}/tenants/{emp_id}/always-on-agent = "agent-helpdesk"
+    """
+    now = time.time()
+    cache_key = f"always_on__{user_id}"
+    if cache_key in _always_on_cache and now - _always_on_cache_ts.get(cache_key, 0) < _ALWAYS_ON_TTL:
+        return _always_on_cache[cache_key]
+
+    try:
+        ssm = boto3.client("ssm", region_name=AWS_REGION)
+        # Check if this employee is assigned an always-on agent
+        try:
+            r = ssm.get_parameter(Name=f"/openclaw/{STACK_NAME}/tenants/{user_id}/always-on-agent")
+            agent_id = r["Parameter"]["Value"]
+        except Exception:
+            _always_on_cache[cache_key] = ""
+            _always_on_cache_ts[cache_key] = now
+            return ""
+
+        # Get the container endpoint for this always-on agent
+        try:
+            r2 = ssm.get_parameter(Name=f"/openclaw/{STACK_NAME}/always-on/{agent_id}/endpoint")
+            endpoint = r2["Parameter"]["Value"]
+            _always_on_cache[cache_key] = endpoint
+            _always_on_cache_ts[cache_key] = now
+            logger.info("Always-on routing: %s → %s (%s)", user_id, agent_id, endpoint)
+            return endpoint
+        except Exception:
+            _always_on_cache[cache_key] = ""
+            _always_on_cache_ts[cache_key] = now
+            return ""
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # HTTP server — receives webhooks from OpenClaw Gateway
 # ---------------------------------------------------------------------------
 
@@ -365,11 +415,16 @@ class TenantRouterHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            result = invoke_agent_runtime(
-                tenant_id=tenant_id,
-                message=message,
-                model=payload.get("model"),
-            )
+            # Check if this routes to an always-on Docker container
+            always_on_url = _get_always_on_endpoint(user_id, channel)
+            if always_on_url:
+                result = _invoke_local_container(always_on_url, tenant_id, message, payload.get("model"))
+            else:
+                result = invoke_agent_runtime(
+                    tenant_id=tenant_id,
+                    message=message,
+                    model=payload.get("model"),
+                )
             self._respond(200, {
                 "tenant_id": tenant_id,
                 "response": result,

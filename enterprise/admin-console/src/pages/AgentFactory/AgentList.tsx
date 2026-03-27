@@ -201,8 +201,69 @@ export default function AgentList() {
         )}
 
         {/* Agent list tabs (personal/shared/all) */}
+        {/* Always-on Shared Agent management — shown when shared tab is active */}
+        {activeTab === 'shared' && (
+          <div className="mt-4 mb-4">
+            <div className="rounded-xl bg-cyan/5 border border-cyan/20 px-4 py-3 mb-4 flex items-start gap-3">
+              <Zap size={16} className="text-cyan mt-0.5 shrink-0" />
+              <div>
+                <p className="text-sm font-semibold text-text-primary">Always-on · Powered by ECR + Docker</p>
+                <p className="text-xs text-text-muted mt-0.5">Shared agents run as persistent Docker containers on the gateway EC2, eliminating cold starts. Each container exposes a local HTTP endpoint; the Tenant Router routes matched employees directly to it.</p>
+              </div>
+            </div>
+            <div className="space-y-3">
+              {sharedAgents.map(a => {
+                const isOn = a.deployMode === 'always-on';
+                const isStarting = a.containerStatus === 'starting';
+                return (
+                  <div key={a.id} className={`rounded-xl border px-4 py-3 flex items-center gap-3 ${isOn ? 'border-cyan/30 bg-cyan/5' : 'border-dark-border/40 bg-surface-dim'}`}>
+                    <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${isOn ? 'bg-cyan/15 text-cyan' : 'bg-dark-hover text-text-muted'}`}>
+                      <Bot size={18} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-semibold text-text-primary">{a.name}</p>
+                        {isOn && <Badge color="info" dot>{isStarting ? 'Starting…' : 'Always-on'}</Badge>}
+                        {!isOn && <Badge color="default">Personal / AgentCore</Badge>}
+                      </div>
+                      <p className="text-xs text-text-muted">{a.positionName}{isOn && a.containerPort ? ` · localhost:${a.containerPort}` : ''}</p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Button size="sm" variant="ghost" onClick={() => navigate(`/agents/${a.id}`)}>
+                        <Eye size={13} /> View
+                      </Button>
+                      {isOn ? (
+                        <Button size="sm" variant="ghost" className="text-danger"
+                          onClick={async () => {
+                            await fetch(`/api/v1/admin/always-on/${a.id}/stop`, { method: 'POST', headers: { Authorization: `Bearer ${localStorage.getItem('openclaw_token')}` } });
+                          }}>
+                          <Trash2 size={13} /> Stop
+                        </Button>
+                      ) : (
+                        <Button size="sm" variant="primary"
+                          onClick={async () => {
+                            await fetch(`/api/v1/admin/always-on/${a.id}/start`, { method: 'POST', headers: { Authorization: `Bearer ${localStorage.getItem('openclaw_token')}` } });
+                          }}>
+                          <Zap size={13} /> Start Always-on
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+              {sharedAgents.length === 0 && (
+                <div className="text-center py-8 text-text-muted">
+                  <Bot size={28} className="mx-auto mb-2 opacity-30" />
+                  <p className="text-sm">No shared agents yet</p>
+                  <p className="text-xs mt-1">Create an agent without assigning it to a specific employee</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Filters */}
-        <div className={`${activeTab === 'config' ? 'hidden' : ''} mt-4 mb-4 flex flex-wrap items-center gap-3`}>
+        <div className={`${activeTab === 'config' || activeTab === 'shared' ? 'hidden' : ''} mt-4 mb-4 flex flex-wrap items-center gap-3`}>
           <div className="relative flex-1 max-w-xs">
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
             <input
@@ -223,7 +284,7 @@ export default function AgentList() {
           <Badge color="info">{filtered.length} agents</Badge>
         </div>
 
-        <DataTable
+        {activeTab !== 'config' && activeTab !== 'shared' && <DataTable
           columns={[
             { key: 'name', label: 'Agent', render: (a: Agent) => (
               <div className="flex items-center gap-3">
@@ -264,7 +325,7 @@ export default function AgentList() {
             )},
           ]}
           data={filtered}
-        />
+        />}
       </Card>
 
       {/* Create Agent Modal */}

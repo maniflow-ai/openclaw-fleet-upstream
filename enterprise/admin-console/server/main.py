@@ -4531,6 +4531,337 @@ def get_system_stats(authorization: str = Header(default="")):
 
 
 # =========================================================================
+# Always-on Shared Agents — Docker containers on EC2
+# =========================================================================
+
+_ALWAYS_ON_PORT_START = 18800  # first always-on container port
+_ALWAYS_ON_ECR_IMAGE = os.environ.get(
+    "AGENT_ECR_IMAGE",
+    "263168716248.dkr.ecr.us-east-1.amazonaws.com/openclaw-multitenancy-multitenancy-agent:latest"
+)
+
+def _next_available_port() -> int:
+    """Find an unused port for a new always-on container (18800-18899)."""
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    ssm = _boto3_main.client("ssm", region_name="us-east-1")
+    used_ports: set = set()
+    try:
+        prefix = f"/openclaw/{stack}/always-on/"
+        paginator = ssm.get_paginator("get_parameters_by_path")
+        for page in paginator.paginate(Path=prefix, Recursive=True):
+            for p in page["Parameters"]:
+                val = p.get("Value", "")
+                if "localhost:" in val:
+                    try:
+                        used_ports.add(int(val.split("localhost:")[1].split("/")[0]))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    for port in range(_ALWAYS_ON_PORT_START, _ALWAYS_ON_PORT_START + 100):
+        if port not in used_ports:
+            return port
+    raise HTTPException(500, "No available ports for always-on container")
+
+
+@app.post("/api/v1/admin/always-on/{agent_id}/start")
+def start_always_on_agent(agent_id: str, authorization: str = Header(default="")):
+    """Start an always-on Docker container for a shared agent on the EC2 gateway."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    bucket = os.environ.get("S3_BUCKET", "openclaw-tenants-263168716248")
+    ddb_table = os.environ.get("DYNAMODB_TABLE", "openclaw-enterprise")
+    ddb_region = os.environ.get("DYNAMODB_REGION", "us-east-2")
+
+    # Get agent info
+    agent = db.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(404, "Agent not found")
+
+    port = _next_available_port()
+    endpoint = f"http://localhost:{port}"
+
+    # Build docker run command — same image as AgentCore, always-on mode
+    docker_cmd = (
+        f"docker run -d --name always-on-{agent_id} --restart unless-stopped "
+        f"-p {port}:8080 "
+        f"-e SESSION_ID=shared__{agent_id} "
+        f"-e SHARED_AGENT_ID={agent_id} "
+        f"-e S3_BUCKET={bucket} "
+        f"-e STACK_NAME={stack} "
+        f"-e AWS_REGION=us-east-1 "
+        f"-e DYNAMODB_TABLE={ddb_table} "
+        f"-e DYNAMODB_REGION={ddb_region} "
+        f"-e SYNC_INTERVAL=120 "
+        f"--log-opt max-size=50m --log-opt max-file=3 "
+        f"{_ALWAYS_ON_ECR_IMAGE}"
+    )
+
+    # Run on EC2 via SSM
+    try:
+        import boto3 as _b3ssm
+        ssm_run = _b3ssm.client("ssm", region_name="us-east-1")
+        # Pull latest image first, then start
+        ecr_login = f"aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 263168716248.dkr.ecr.us-east-1.amazonaws.com"
+        pull_cmd = f"docker pull {_ALWAYS_ON_ECR_IMAGE}"
+        stop_existing = f"docker rm -f always-on-{agent_id} 2>/dev/null || true"
+        resp = ssm_run.send_command(
+            InstanceIds=["i-0aa07bd9a04fa2255"],
+            DocumentName="AWS-RunShellScript",
+            Parameters={"commands": [ecr_login, pull_cmd, stop_existing, docker_cmd, f"sleep 3 && curl -s http://localhost:{port}/ping && echo STARTED"]},
+            TimeoutSeconds=120,
+        )
+        cmd_id = resp["Command"]["CommandId"]
+    except Exception as e:
+        raise HTTPException(500, f"Failed to start container: {e}")
+
+    # Register endpoint in SSM
+    try:
+        ssm = _boto3_main.client("ssm", region_name="us-east-1")
+        ssm.put_parameter(Name=f"/openclaw/{stack}/always-on/{agent_id}/endpoint", Value=endpoint, Type="String", Overwrite=True)
+        ssm.put_parameter(Name=f"/openclaw/{stack}/always-on/{agent_id}/port", Value=str(port), Type="String", Overwrite=True)
+        ssm.put_parameter(Name=f"/openclaw/{stack}/always-on/{agent_id}/ssm-cmd", Value=cmd_id, Type="String", Overwrite=True)
+    except Exception as e:
+        print(f"[always-on] SSM registration failed: {e}")
+
+    # Update agent deployMode in DynamoDB
+    try:
+        agents = db.get_agents()
+        a = next((x for x in agents if x["id"] == agent_id), None)
+        if a:
+            from decimal import Decimal
+            import boto3 as _b3d
+            ddb = _b3d.resource("dynamodb", region_name=ddb_region)
+            table = ddb.Table(ddb_table)
+            table.update_item(
+                Key={"PK": "ORG#acme", "SK": f"AGENT#{agent_id}"},
+                UpdateExpression="SET deployMode = :m, containerPort = :p, containerStatus = :s",
+                ExpressionAttributeValues={":m": "always-on", ":p": port, ":s": "starting"},
+            )
+    except Exception as e:
+        print(f"[always-on] DynamoDB update failed: {e}")
+
+    return {"started": True, "agentId": agent_id, "port": port, "endpoint": endpoint, "ssmCmdId": cmd_id}
+
+
+@app.post("/api/v1/admin/always-on/{agent_id}/stop")
+def stop_always_on_agent(agent_id: str, authorization: str = Header(default="")):
+    """Stop and remove the always-on container for an agent."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+
+    # Stop container via SSM
+    try:
+        import boto3 as _b3ssm2
+        ssm_run = _b3ssm2.client("ssm", region_name="us-east-1")
+        ssm_run.send_command(
+            InstanceIds=["i-0aa07bd9a04fa2255"],
+            DocumentName="AWS-RunShellScript",
+            Parameters={"commands": [f"docker rm -f always-on-{agent_id} 2>/dev/null || true && echo STOPPED"]},
+        )
+    except Exception as e:
+        print(f"[always-on] Stop command failed: {e}")
+
+    # Remove SSM registration
+    try:
+        ssm = _boto3_main.client("ssm", region_name="us-east-1")
+        for suffix in ["/endpoint", "/port", "/ssm-cmd"]:
+            try:
+                ssm.delete_parameter(Name=f"/openclaw/{stack}/always-on/{agent_id}{suffix}")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Update DynamoDB
+    try:
+        import boto3 as _b3d2
+        ddb_region = os.environ.get("DYNAMODB_REGION", "us-east-2")
+        ddb = _b3d2.resource("dynamodb", region_name=ddb_region)
+        table = ddb.Table(os.environ.get("DYNAMODB_TABLE", "openclaw-enterprise"))
+        table.update_item(
+            Key={"PK": "ORG#acme", "SK": f"AGENT#{agent_id}"},
+            UpdateExpression="SET deployMode = :m, containerStatus = :s REMOVE containerPort",
+            ExpressionAttributeValues={":m": "personal", ":s": "stopped"},
+        )
+    except Exception:
+        pass
+
+    return {"stopped": True, "agentId": agent_id}
+
+
+@app.get("/api/v1/admin/always-on/{agent_id}/status")
+def get_always_on_status(agent_id: str, authorization: str = Header(default="")):
+    """Get status of an always-on container."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    try:
+        ssm = _boto3_main.client("ssm", region_name="us-east-1")
+        endpoint_param = ssm.get_parameter(Name=f"/openclaw/{stack}/always-on/{agent_id}/endpoint")
+        endpoint = endpoint_param["Parameter"]["Value"]
+        # Ping the container
+        try:
+            import requests as _r
+            ping = _r.get(f"{endpoint}/ping", timeout=3)
+            running = ping.status_code == 200
+        except Exception:
+            running = False
+        return {"running": running, "endpoint": endpoint, "agentId": agent_id}
+    except Exception:
+        return {"running": False, "endpoint": None, "agentId": agent_id}
+
+
+@app.put("/api/v1/admin/always-on/{agent_id}/assign/{emp_id}")
+def assign_always_on_to_employee(agent_id: str, emp_id: str, authorization: str = Header(default="")):
+    """Assign an employee to use the always-on agent instead of AgentCore."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    ssm = _boto3_main.client("ssm", region_name="us-east-1")
+    ssm.put_parameter(
+        Name=f"/openclaw/{stack}/tenants/{emp_id}/always-on-agent",
+        Value=agent_id, Type="String", Overwrite=True,
+    )
+    return {"assigned": True, "empId": emp_id, "agentId": agent_id}
+
+
+@app.delete("/api/v1/admin/always-on/{agent_id}/assign/{emp_id}")
+def unassign_always_on_from_employee(agent_id: str, emp_id: str, authorization: str = Header(default="")):
+    """Remove employee's always-on assignment — they fall back to AgentCore."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    try:
+        _boto3_main.client("ssm", region_name="us-east-1").delete_parameter(
+            Name=f"/openclaw/{stack}/tenants/{emp_id}/always-on-agent"
+        )
+    except Exception:
+        pass
+    return {"unassigned": True, "empId": emp_id}
+
+
+# =========================================================================
+# Digital Twin — public shareable agent URL
+# =========================================================================
+
+_PUBLIC_URL = os.environ.get("PUBLIC_URL", "https://openclaw.awspsa.com")
+
+
+@app.get("/api/v1/portal/twin")
+def get_twin_status(authorization: str = Header(default="")):
+    """Get the current employee's digital twin status."""
+    user = _require_auth(authorization)
+    record = db.get_twin_by_employee(user.employee_id)
+    if not record or not record.get("active"):
+        return {"active": False, "url": None, "chatCount": 0, "viewCount": 0}
+    token = record.get("tokenRef") or record.get("token", "")
+    return {
+        "active": True,
+        "url": f"{_PUBLIC_URL}/twin/{token}",
+        "token": token,
+        "chatCount": record.get("chatCount", 0),
+        "viewCount": record.get("viewCount", 0),
+        "createdAt": record.get("createdAt", ""),
+    }
+
+
+@app.post("/api/v1/portal/twin")
+def enable_twin(authorization: str = Header(default="")):
+    """Enable digital twin — generate a shareable URL for this employee's agent."""
+    user = _require_auth(authorization)
+    # Revoke any existing twin first
+    existing = db.get_twin_by_employee(user.employee_id)
+    if existing:
+        db.disable_twin(user.employee_id)
+    # Get employee + agent info
+    emp = db.get_employee(user.employee_id)
+    if not emp:
+        raise HTTPException(404, "Employee not found")
+    agents = db.get_agents()
+    agent = next((a for a in agents if a.get("employeeId") == user.employee_id), None)
+    # Generate secure token
+    import secrets
+    token = secrets.token_urlsafe(20)
+    record = db.create_twin(
+        emp_id=user.employee_id,
+        token=token,
+        emp_name=emp.get("name", user.name),
+        position_name=emp.get("positionName", ""),
+        agent_name=agent.get("name", f"{emp.get('name')} Agent") if agent else f"{emp.get('name')} Agent",
+    )
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "config_change", "actorId": user.employee_id,
+        "actorName": user.name, "targetType": "twin", "targetId": token,
+        "detail": f"Digital twin enabled for {user.name}", "status": "success",
+    })
+    return {"active": True, "url": f"{_PUBLIC_URL}/twin/{token}", "token": token}
+
+
+@app.delete("/api/v1/portal/twin")
+def disable_twin(authorization: str = Header(default="")):
+    """Disable digital twin — revoke the public URL."""
+    user = _require_auth(authorization)
+    db.disable_twin(user.employee_id)
+    return {"active": False}
+
+
+# ── Public twin endpoints (NO auth required) ──────────────────────────────────
+
+@app.get("/api/v1/public/twin/{token}")
+def get_public_twin_info(token: str):
+    """Public: get employee info for the twin page (no auth)."""
+    record = db.get_twin_by_token(token)
+    if not record or not record.get("active"):
+        raise HTTPException(404, "This digital twin is not available")
+    db.increment_twin_stat(token, "viewCount")
+    return {
+        "empName": record.get("empName", ""),
+        "positionName": record.get("positionName", ""),
+        "agentName": record.get("agentName", ""),
+        "companyName": "ACME Corp",
+    }
+
+
+@app.post("/api/v1/public/twin/{token}/chat")
+def twin_chat(token: str, body: dict):
+    """Public: send a message to the employee's digital twin (no auth).
+    The twin has full access to the employee's SOUL + memory."""
+    record = db.get_twin_by_token(token)
+    if not record or not record.get("active"):
+        raise HTTPException(404, "This digital twin is not available")
+
+    emp_id = record.get("empId", "")
+    message = body.get("message", "").strip()
+    if not message:
+        raise HTTPException(400, "message required")
+    if len(message) > 2000:
+        raise HTTPException(400, "Message too long (max 2000 chars)")
+
+    # Rate limit: 60 messages/hour per token (simple check via chatCount)
+    # For now just increment and allow — add Redis/DynamoDB TTL later if needed
+    db.increment_twin_stat(token, "chatCount")
+
+    # Route through Tenant Router with twin__ channel prefix
+    # server.py in the agent container will detect "twin" channel and inject
+    # digital twin context into SOUL.md
+    router_url = os.environ.get("TENANT_ROUTER_URL", "http://localhost:8090")
+    try:
+        import requests as _req
+        r = _req.post(f"{router_url}/route", json={
+            "channel": "twin",
+            "user_id": emp_id,
+            "message": message,
+        }, timeout=180)
+        if r.status_code == 200:
+            data = r.json()
+            resp = data.get("response", {})
+            reply = resp.get("response", str(resp)) if isinstance(resp, dict) else str(resp)
+            return {"reply": reply, "agentName": record.get("agentName", "")}
+        raise HTTPException(502, "Agent unavailable")
+    except Exception as e:
+        raise HTTPException(502, f"Agent unavailable: {str(e)[:100]}")
+
+
+# =========================================================================
 # Startup
 # =========================================================================
 

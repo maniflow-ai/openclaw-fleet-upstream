@@ -55,6 +55,10 @@ export interface Agent {
   qualityScore: number | null;
   createdAt: string;
   updatedAt: string;
+  // Always-on shared agent fields
+  deployMode?: 'personal' | 'always-on';
+  containerPort?: number;
+  containerStatus?: 'starting' | 'running' | 'stopped' | 'error';
 }
 
 export interface SoulLayer {
