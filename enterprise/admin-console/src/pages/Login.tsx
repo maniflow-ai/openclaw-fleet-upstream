@@ -5,16 +5,16 @@ import { Bot, LogIn, AlertCircle } from 'lucide-react';
 import ClawForgeLogo from '../components/ClawForgeLogo';
 
 const DEMO_ACCOUNTS = [
-  { id: 'emp-ada',     name: 'Ada',         role: 'Executive', dept: 'Executive', desc: 'Claude Sonnet 4.6 · No restrictions · All tools · Full S3/Bedrock access 🔓' },
-  { id: 'emp-wjd',     name: 'WJD',         role: 'Executive', dept: 'Executive', desc: 'Claude Sonnet 4.6 · No restrictions · All tools · Full S3/Bedrock access 🔓' },
-  { id: 'emp-dickson', name: 'Dickson',     role: 'Executive', dept: 'Executive', desc: 'Claude Sonnet 4.6 · Always-on ECS · EFS workspace · No restrictions 🔓' },
+  { id: 'emp-jiade', name: 'JiaDe Wang',  role: 'Admin',     dept: 'Engineering', desc: 'Admin + SA Agent · Discord · cross-session memory ✨' },
+  { id: 'emp-wjd',   name: 'WJD',         role: 'Executive', dept: 'Executive',   desc: 'No restrictions · All tools · Full access 🔓' },
+  { id: 'emp-dickson', name: 'Dickson',   role: 'Executive', dept: 'Executive',   desc: 'Always-on ECS · EFS workspace · No restrictions 🔓' },
   { id: 'emp-z3',    name: 'Zhang San',   role: 'Admin',     dept: 'Engineering', desc: 'Full Admin Console access' },
-  { id: 'emp-jiade', name: 'JiaDe Wang',  role: 'Admin',     dept: 'Engineering', desc: 'Admin + SA Agent with cross-session memory ✨' },
-  { id: 'emp-peter', name: 'Peter Wu',    role: 'Manager',   dept: 'Engineering', desc: 'Executive Agent with memory · Discord ✨' },
+  { id: 'emp-peter', name: 'Peter Wu',    role: 'Manager',   dept: 'Engineering', desc: 'Executive Agent · Discord · memory ✨' },
   { id: 'emp-lin',   name: 'Lin Xiaoyu', role: 'Manager',   dept: 'Product',     desc: 'Product department view only' },
   { id: 'emp-david', name: 'David Park',  role: 'Employee',  dept: 'Finance',     desc: 'Finance Agent · Excel/SAP tools · memory ✨' },
   { id: 'emp-w5',    name: 'Wang Wu',     role: 'Employee',  dept: 'Engineering', desc: 'Portal + Telegram · SDE Agent (shell/code)' },
   { id: 'emp-carol', name: 'Carol Zhang', role: 'Employee',  dept: 'Finance',     desc: 'Portal + Telegram · Finance Agent' },
+  { id: 'emp-ada',   name: 'Ada',         role: 'Executive', dept: 'Executive',   desc: 'No restrictions · All tools · Full access 🔓' },
 ];
 
 export default function Login() {
