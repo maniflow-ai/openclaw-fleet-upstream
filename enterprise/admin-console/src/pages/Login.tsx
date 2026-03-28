@@ -5,8 +5,9 @@ import { Bot, LogIn, AlertCircle } from 'lucide-react';
 import ClawForgeLogo from '../components/ClawForgeLogo';
 
 const DEMO_ACCOUNTS = [
-  { id: 'emp-ada',   name: 'Ada',         role: 'Executive', dept: 'Executive', desc: 'Claude Sonnet 4.6 · No restrictions · All tools · Full S3/Bedrock access 🔓' },
-  { id: 'emp-wjd',   name: 'WJD',         role: 'Executive', dept: 'Executive', desc: 'Claude Sonnet 4.6 · No restrictions · All tools · Full S3/Bedrock access 🔓' },
+  { id: 'emp-ada',     name: 'Ada',         role: 'Executive', dept: 'Executive', desc: 'Claude Sonnet 4.6 · No restrictions · All tools · Full S3/Bedrock access 🔓' },
+  { id: 'emp-wjd',     name: 'WJD',         role: 'Executive', dept: 'Executive', desc: 'Claude Sonnet 4.6 · No restrictions · All tools · Full S3/Bedrock access 🔓' },
+  { id: 'emp-dickson', name: 'Dickson',     role: 'Executive', dept: 'Executive', desc: 'Claude Sonnet 4.6 · Always-on ECS · EFS workspace · No restrictions 🔓' },
   { id: 'emp-z3',    name: 'Zhang San',   role: 'Admin',     dept: 'Engineering', desc: 'Full Admin Console access' },
   { id: 'emp-jiade', name: 'JiaDe Wang',  role: 'Admin',     dept: 'Engineering', desc: 'Admin + SA Agent with cross-session memory ✨' },
   { id: 'emp-peter', name: 'Peter Wu',    role: 'Manager',   dept: 'Engineering', desc: 'Executive Agent with memory · Discord ✨' },
