@@ -35,7 +35,12 @@ AWS_REGION = os.environ.get("AWS_REGION", "us-east-2")
 # Gateway region: where EC2, SSM, ECR, and AgentCore live.
 # Reads AWS_REGION env var (set in /etc/openclaw/env); falls back to us-east-1.
 # Note: DynamoDB may be in a different region (DYNAMODB_REGION) — handled separately.
-_GATEWAY_REGION = os.environ.get("AWS_REGION", os.environ.get("SSM_REGION", "us-east-1"))
+# Gateway region: where EC2, SSM, ECS, ECR, AgentCore live.
+# Uses GATEWAY_REGION env var first (set in start.sh / /etc/openclaw/env),
+# then SSM_REGION, then falls back to us-east-1.
+# Important: AWS_REGION is NOT used here because it may be set to us-east-2
+# for DynamoDB, while all gateway resources (SSM, ECS, EC2) are in us-east-1.
+_GATEWAY_REGION = os.environ.get("GATEWAY_REGION", os.environ.get("SSM_REGION", "us-east-1"))
 
 
 def _resolve_gateway_instance_id() -> str:
